@@ -79,10 +79,13 @@ def _pit_merge_macro(
     """
     # Left DataFrame: trading calendar
     trading_df = pd.DataFrame({"date": trading_index})
+    trading_df["date"] = trading_df["date"].astype("datetime64[us]")
 
     # Right DataFrame: macro data sorted by publication date
     macro_sorted = macro_series[["realtime_start", value_col]].copy()
     macro_sorted = macro_sorted.sort_values("realtime_start").dropna(subset=[value_col])
+    macro_sorted["realtime_start"] = macro_sorted["realtime_start"].astype("datetime64[us]")
+
 
     # merge_asof: for each trading date, find the LAST macro record with
     # realtime_start <= trading date (backward search = no look-ahead)

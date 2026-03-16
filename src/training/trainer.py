@@ -131,11 +131,12 @@ class Trainer:
         # Create checkpoint directory
         os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
 
-    def _warmup_lr(self, epoch: int) -> float:
-        """Linear warmup from 0 to target LR over warmup_epochs."""
+    def _set_warmup_lr(self, epoch: int) -> None:
+        """Apply linear LR warmup for the first warmup_epochs epochs."""
         if epoch < self.warmup_epochs:
-            return self.lr * (epoch + 1) / self.warmup_epochs
-        return None  # Signal to use scheduler
+            lr = self.lr * (epoch + 1) / self.warmup_epochs
+            for pg in self.optimizer.param_groups:
+                pg["lr"] = lr
 
     def _run_epoch(self, loader: DataLoader, train: bool) -> float:
         """
@@ -193,10 +194,7 @@ class Trainer:
 
         for epoch in range(self.n_epochs):
             # ── Learning Rate Warmup ─────────────────────────────────────────
-            warmup_lr = self._warmup_lr(epoch)
-            if warmup_lr is not None:
-                for pg in self.optimizer.param_groups:
-                    pg["lr"] = warmup_lr
+            self._set_warmup_lr(epoch)
 
             # ── Train ─────────────────────────────────────────────────────────
             train_nll = self._run_epoch(self.train_loader, train=True)

@@ -39,12 +39,14 @@ logger = logging.getLogger(__name__)
 # Configuration constants
 # ─────────────────────────────────────────────────────────────────────────────
 TICKERS = ["SPY", "TLT", "GLD"]
-DATA_START = "2004-01-01"   # Extra buffer year for lagged feature computation
-DATA_END   = "2024-01-01"
+DATA_START  = "2004-01-01"   # Extra buffer year for lagged feature computation
+DATA_END    = "2024-01-01"
 TRAIN_START = "2005-01-01"
-TRAIN_END   = "2021-12-31"
+TRAIN_END   = "2016-12-31"   # 12 years of training data
+VAL_START   = "2017-01-01"   # 5-year validation window (includes 2020 COVID crash)
+VAL_END     = "2021-12-31"
 TEST_START  = "2022-01-01"
-SEQ_LEN     = 63            # 3 months of trading days (lookback window for TFT)
+SEQ_LEN     = 63             # 3 months of trading days (lookback window for TFT)
 BATCH_SIZE  = 64
 
 
@@ -179,6 +181,9 @@ def verify_no_lookahead(
     Sanity check: verify that no macro value in `master` was published AFTER
     the corresponding trading date.
 
+    Uses a vectorized approach (O(N)) instead of a nested loop to keep this
+    check practical on a 20-year daily dataset.
+
     Parameters
     ----------
     master : pd.DataFrame
@@ -197,22 +202,28 @@ def verify_no_lookahead(
             continue
         if name not in master.columns:
             continue
-        # Build a lookup: observation value → earliest possible publication date
-        pub_lookup = df.set_index("realtime_start")[name]
-        for date in master.index:
-            val = master.loc[date, name]
-            if pd.isna(val):
-                continue
-            # Find the date(s) when this value was published
-            pub_dates = pub_lookup[pub_lookup == val].index
-            if len(pub_dates) == 0:
-                continue  # Value from forward-fill, cannot trace exactly
-            earliest_pub = pub_dates.min()
-            assert date >= earliest_pub, (
-                f"LOOK-AHEAD BIAS DETECTED: On trading day {date.date()}, "
-                f"macro variable {name} has value {val:.4f} which was not "
-                f"published until {earliest_pub.date()}."
-            )
+
+        # Build mapping: value → earliest publication date (vectorized, O(N))
+        pub_series = df.set_index("realtime_start")[name].dropna()
+        val_to_earliest_pub = (
+            pub_series.reset_index()
+            .groupby(name)["realtime_start"]
+            .min()
+        )
+
+        master_col = master[name].dropna()
+        earliest_pubs = master_col.map(val_to_earliest_pub)
+
+        # Drop values that cannot be traced (e.g., forward-filled, not in lookup)
+        traceable = earliest_pubs.dropna()
+        violations = traceable.index[traceable.index < traceable]
+
+        assert len(violations) == 0, (
+            f"LOOK-AHEAD BIAS DETECTED in '{name}': {len(violations)} trading days "
+            f"have macro values published AFTER the trading date. "
+            f"First violation: {violations[0].date()}"
+        )
+        logger.info("  %s: OK ✓", name)
     logger.info("  No look-ahead bias detected. ✓")
 
 
@@ -269,18 +280,21 @@ def build_pipeline(
     seq_len: int = SEQ_LEN,
     batch_size: int = BATCH_SIZE,
     train_end: str = TRAIN_END,
+    val_start: str = VAL_START,
+    val_end: str = VAL_END,
     test_start: str = TEST_START,
     device: Optional[torch.device] = None,
-) -> Tuple[DataLoader, DataLoader, StandardScaler, StandardScaler, Dict, int, int]:
+) -> Tuple[DataLoader, DataLoader, DataLoader, StandardScaler, StandardScaler, Dict, int, int]:
     """
     Full pipeline: download → align → split → scale → sequence → DataLoader.
 
     Returns
     -------
     train_loader : DataLoader
-    test_loader : DataLoader
+    val_loader   : DataLoader  (2017-2021 by default — held-out from checkpointing)
+    test_loader  : DataLoader  (2022+ — never seen during training or early stopping)
     macro_scaler : StandardScaler (fitted on training macro features only)
-    ret_scaler : StandardScaler (fitted on training returns only)
+    ret_scaler   : StandardScaler (fitted on training returns only)
     info : dict with dataset metadata (dates, column names, shapes)
     num_macro_features : int
     num_assets : int
@@ -293,16 +307,19 @@ def build_pipeline(
     num_macro_features = len(feature_cols)
     num_assets = len(ret_cols)
 
-    # ── Temporal train/test split ─────────────────────────────────────────────
+    # ── Temporal train / val / test split ─────────────────────────────────────
     train_mask = master.index <= pd.Timestamp(train_end)
+    val_mask   = (master.index >= pd.Timestamp(val_start)) & (master.index <= pd.Timestamp(val_end))
     test_mask  = master.index >= pd.Timestamp(test_start)
 
     master_train = master[train_mask]
+    master_val   = master[val_mask]
     master_test  = master[test_mask]
 
     logger.info(
-        "Train: %s to %s (%d rows). Test: %s to %s (%d rows).",
+        "Train: %s to %s (%d rows). Val: %s to %s (%d rows). Test: %s to %s (%d rows).",
         master_train.index[0].date(), master_train.index[-1].date(), len(master_train),
+        master_val.index[0].date(),   master_val.index[-1].date(),   len(master_val),
         master_test.index[0].date(),  master_test.index[-1].date(),  len(master_test),
     )
 
@@ -310,62 +327,62 @@ def build_pipeline(
     macro_scaler = StandardScaler()
     ret_scaler   = StandardScaler()
 
-    # Fit on training portion only
     macro_scaler.fit(master_train[feature_cols].values)
     ret_scaler.fit(master_train[ret_cols].values)
 
-    # Transform both train and test
-    master_train_scaled = master_train.copy()
-    master_test_scaled  = master_test.copy()
+    # Transform all three splits
+    def _scale(df):
+        scaled = df.copy()
+        scaled[feature_cols] = macro_scaler.transform(df[feature_cols].values)
+        scaled[ret_cols]     = ret_scaler.transform(df[ret_cols].values)
+        return scaled
 
-    master_train_scaled[feature_cols] = macro_scaler.transform(master_train[feature_cols].values)
-    master_train_scaled[ret_cols]     = ret_scaler.transform(master_train[ret_cols].values)
-
-    master_test_scaled[feature_cols] = macro_scaler.transform(master_test[feature_cols].values)
-    master_test_scaled[ret_cols]     = ret_scaler.transform(master_test[ret_cols].values)
+    master_train_scaled = _scale(master_train)
+    master_val_scaled   = _scale(master_val)
+    master_test_scaled  = _scale(master_test)
 
     # ── Build sliding-window sequences ────────────────────────────────────────
     X_train, y_train, dates_train = build_sequences(master_train_scaled, seq_len)
+    X_val,   y_val,   dates_val   = build_sequences(master_val_scaled,   seq_len)
     X_test,  y_test,  dates_test  = build_sequences(master_test_scaled,  seq_len)
 
     logger.info(
-        "Sequences built. Train: %s. Test: %s.",
-        X_train.shape, X_test.shape,
+        "Sequences built. Train: %s. Val: %s. Test: %s.",
+        X_train.shape, X_val.shape, X_test.shape,
     )
 
     # ── Create PyTorch DataLoaders ────────────────────────────────────────────
     dtype = torch.float32
-    train_ds = TensorDataset(
-        torch.tensor(X_train, dtype=dtype),
-        torch.tensor(y_train, dtype=dtype),
-    )
-    test_ds = TensorDataset(
-        torch.tensor(X_test, dtype=dtype),
-        torch.tensor(y_test, dtype=dtype),
-    )
+    train_ds = TensorDataset(torch.tensor(X_train, dtype=dtype), torch.tensor(y_train, dtype=dtype))
+    val_ds   = TensorDataset(torch.tensor(X_val,   dtype=dtype), torch.tensor(y_val,   dtype=dtype))
+    test_ds  = TensorDataset(torch.tensor(X_test,  dtype=dtype), torch.tensor(y_test,  dtype=dtype))
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  drop_last=True)
+    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, drop_last=False)
     test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, drop_last=False)
 
     info = {
-        "feature_cols": feature_cols,
-        "ret_cols": ret_cols,
-        "tickers": TICKERS,
-        "dates_train": dates_train,
-        "dates_test": dates_test,
-        "train_shape": X_train.shape,
-        "test_shape": X_test.shape,
-        "master_train": master_train,   # Unscaled, for analysis
-        "master_test": master_test,
+        "feature_cols":  feature_cols,
+        "ret_cols":      ret_cols,
+        "tickers":       TICKERS,
+        "dates_train":   dates_train,
+        "dates_val":     dates_val,
+        "dates_test":    dates_test,
+        "train_shape":   X_train.shape,
+        "val_shape":     X_val.shape,
+        "test_shape":    X_test.shape,
+        "master_train":  master_train,
+        "master_val":    master_val,
+        "master_test":   master_test,
     }
 
-    return train_loader, test_loader, macro_scaler, ret_scaler, info, num_macro_features, num_assets
+    return train_loader, val_loader, test_loader, macro_scaler, ret_scaler, info, num_macro_features, num_assets
 
 
 if __name__ == "__main__":
     import os
     logging.basicConfig(level=logging.INFO)
     api_key = os.environ.get("FRED_API_KEY", "YOUR_FRED_API_KEY")
-    train_loader, test_loader, *_ = build_pipeline(fred_api_key=api_key)
+    train_loader, val_loader, test_loader, *_ = build_pipeline(fred_api_key=api_key)
     batch = next(iter(train_loader))
     print("Train batch shapes:", batch[0].shape, batch[1].shape)

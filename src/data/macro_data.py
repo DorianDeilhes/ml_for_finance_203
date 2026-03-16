@@ -155,17 +155,20 @@ def _transform_fed_funds_rate(df: pd.DataFrame, label: str = "FedFundsRate") -> 
     Compute first difference of the Federal Funds Rate.
 
     The rate level is not stationary; the daily or monthly change is approximately stationary.
+    Publication dates from FRED are preserved (not replaced with a synthetic lag).
     """
     df = df.copy().sort_values("observation_date")
-    # Resample to monthly first for daily series to reduce noise
-    df_monthly = df.set_index("observation_date")[[label]].resample("MS").last()
+    df_set = df.set_index("observation_date")
+
+    # Resample to monthly: take the last observation per month for both value and pub date
+    df_monthly_val = df_set[[label]].resample("MS").last()
+    df_monthly_pub = df_set[["realtime_start"]].resample("MS").max()  # latest pub date in month
+
+    df_monthly = pd.concat([df_monthly_val, df_monthly_pub], axis=1)
     df_monthly[label] = df_monthly[label].diff()
     df_monthly = df_monthly.dropna()
-    # Re-attach the realtime_start from original df
-    df_out = df_monthly.reset_index().rename(columns={"observation_date": "observation_date"})
-    # Use observation_date + 1 day as realtime_start (daily rate, near-instant publication)
-    df_out["realtime_start"] = df_out["observation_date"] + pd.Timedelta(days=1)
-    return df_out
+
+    return df_monthly.reset_index().rename(columns={"index": "observation_date"})
 
 
 def download_vix(start: str = "2003-01-01", end: str = "2024-01-01") -> pd.DataFrame:

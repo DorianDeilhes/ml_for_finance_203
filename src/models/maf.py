@@ -166,9 +166,13 @@ class MADE(nn.Module):
         m_hidden = [rng.integers(low=1, high=input_dim, size=self.hidden_dim, endpoint=False)
                     for _ in range(self.n_hidden)]
 
-        # Output layer degrees: 2*D outputs — the i-th output pair (alpha_i, mu_i)
-        # must NOT depend on x_i, so we assign degree = i - 1 for strict inequality
-        m_output = np.repeat(np.arange(0, input_dim), 2)  # [0,0, 1,1, ..., D-1, D-1]
+        # Output layer degrees: first D outputs are alpha, next D are mu.
+        # Because forward() does `alpha, mu = h.chunk(2, dim=-1)`, degrees must be
+        # [0..D-1, 0..D-1] so alpha_i and mu_i share the same autoregressive order.
+        m_output = np.concatenate([
+            np.arange(0, input_dim),
+            np.arange(0, input_dim),
+        ])
 
         # Build mask for each layer
         all_m = [m_input] + m_hidden + [m_output]
@@ -231,8 +235,8 @@ class MADE(nn.Module):
         # Output: split into alpha and mu (both shape: batch, D)
         alpha, mu = h.chunk(2, dim=-1)
 
-        # Clamp alpha to prevent numerical explosion during training
-        alpha = torch.clamp(alpha, min=-5.0, max=5.0)
+        # Smoothly bound alpha to keep exp(alpha) numerically stable.
+        alpha = 3.0 * torch.tanh(alpha / 3.0)
 
         return alpha, mu
 

@@ -74,14 +74,14 @@ class Trainer:
         model: ConditionalNormalizingFlow,
         train_loader: DataLoader,
         val_loader: DataLoader,
-        lr: float = 1e-3,
+        lr: float = 2e-4,
         weight_decay: float = 1e-4,
         n_epochs: int = 100,
         patience: int = 10,
         grad_clip: float = 1.0,
         checkpoint_path: str = "checkpoints/best_model.pt",
         device: Optional[torch.device] = None,
-        warmup_epochs: int = 5,
+        warmup_epochs: int = 2,
     ) -> None:
         self.model = model
         self.train_loader = train_loader
@@ -113,6 +113,7 @@ class Trainer:
             lr=lr,
             weight_decay=weight_decay,
             betas=(0.9, 0.999),
+            eps=1e-6,
         )
 
         # Cosine annealing LR schedule (after warmup)
@@ -165,21 +166,33 @@ class Trainer:
                 returns   = returns.to(self.device)
 
                 if train:
-                    self.optimizer.zero_grad()
+                    self.optimizer.zero_grad(set_to_none=True)
 
                 # Forward pass: compute NLL
                 nll, _ = self.model(returns, macro_seq)
 
+                if not torch.isfinite(nll):
+                    logger.warning("Non-finite NLL encountered; skipping batch.")
+                    if train:
+                        self.optimizer.zero_grad(set_to_none=True)
+                    continue
+
                 if train:
                     nll.backward()
                     # Gradient clipping prevents exploding gradients in normalizing flows
-                    nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                    grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                    if not torch.isfinite(grad_norm):
+                        logger.warning("Non-finite gradient norm encountered; skipping optimizer step.")
+                        self.optimizer.zero_grad(set_to_none=True)
+                        continue
                     self.optimizer.step()
 
                 total_nll += nll.item()
                 n_batches += 1
 
-        return total_nll / max(n_batches, 1)
+        if n_batches == 0:
+            return float("inf")
+        return total_nll / n_batches
 
     def fit(self) -> Dict[str, List[float]]:
         """

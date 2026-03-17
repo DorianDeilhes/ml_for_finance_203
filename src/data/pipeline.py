@@ -164,9 +164,12 @@ def build_master_dataset(
     macro_cols = list(macro_dict.keys())
     master[macro_cols] = master[macro_cols].ffill()
 
-    # Drop rows with ALL macro values still NaN (beginning of dataset before
-    # macro data is available)
-    master = master.dropna(subset=macro_cols, how="all")
+    # Drop any row with ANY NaN — covers:
+    #   (a) rolling-vol warmup rows (first ~10 rows have NaN realvol)
+    #   (b) trading days before the earliest macro publication date
+    # The DATA_START buffer year (2004) absorbs these dropped rows so that
+    # TRAIN_START (2005-01-01) is always fully populated.
+    master = master.dropna()
 
     logger.info(
         "Master dataset built. Shape: %s. Columns: %s",

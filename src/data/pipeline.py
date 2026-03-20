@@ -39,15 +39,15 @@ logger = logging.getLogger(__name__)
 # Configuration constants
 # ─────────────────────────────────────────────────────────────────────────────
 TICKERS = ["SPY", "TLT", "GLD"]
-DATA_START  = "2004-01-01"   # Extra buffer year for lagged feature computation
-DATA_END    = "2024-01-01"
-TRAIN_START = "2005-01-01"
-TRAIN_END   = "2016-12-31"   # 12 years of training data
-VAL_START   = "2017-01-01"   # 5-year validation window (includes 2020 COVID crash)
-VAL_END     = "2021-12-31"
-TEST_START  = "2022-01-01"
-SEQ_LEN     = 63             # 3 months of trading days (lookback window for TFT)
-BATCH_SIZE  = 64
+DATA_START="2004-01-01"   # Extra buffer year for lagged feature computation
+DATA_END="2024-01-01"
+TRAIN_START="2005-01-01"
+TRAIN_END="2016-12-31"   # 12 years of training data
+VAL_START="2017-01-01"   # 5-year validation window (includes 2020 COVID crash)
+VAL_END="2021-12-31"
+TEST_START="2022-01-01"
+SEQ_LEN=63             # 3 months of trading days (lookback window for TFT)
+BATCH_SIZE=64
 
 
 def _pit_merge_macro(

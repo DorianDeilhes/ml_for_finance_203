@@ -888,3 +888,394 @@ class Backtester:
 
         return pd.DataFrame(rows, columns=["Metric", "Value"])
 
+
+# ============================================================================
+# OPTIMIZED BACKTESTER: Dynamic Portfolio Optimization
+# ============================================================================
+
+
+class OptimizedBacktester:
+    """
+    Extended backtester that computes optimal portfolio weights at each time step
+    using the learned conditional distribution p(X_t | h_t).
+
+    Compares:
+    1. Baseline (equal-weight) portfolio
+    2. CVaR-minimized portfolio (least tail risk)
+    3. Sharpe-maximized portfolio (best risk-adjusted returns)
+
+    Metrics tracked:
+    - Daily portfolio returns for each strategy
+    - Rolling Sharpe ratio, volatility, max drawdown
+    - Comparison of VaR/CVaR accuracy across strategies
+    - Weight stability over time
+
+    Parameters
+    ----------
+    baseline_backtester : Backtester
+        A completed baseline backtest with results.
+    optimization_method : {'cvar', 'sharpe'}
+        Which optimization objective to use (default: 'cvar').
+    allow_short_selling : bool
+        If False, weights are constrained to [0, 1] (long-only).
+    """
+
+    def __init__(
+        self,
+        baseline_backtester: Backtester,
+        optimization_method: str = "cvar",
+        allow_short_selling: bool = False,
+    ):
+        self.baseline_backtester = baseline_backtester
+        self.optimization_method = optimization_method
+        self.allow_short_selling = allow_short_selling
+
+        # Import optimizer here to avoid circular imports
+        from src.backtest.portfolio_optimizer import (
+            PortfolioOptimizer,
+            DynamicPortfolioMetrics,
+        )
+
+        self.PortfolioOptimizer = PortfolioOptimizer
+        self.DynamicPortfolioMetrics = DynamicPortfolioMetrics
+
+        self.device = baseline_backtester.device
+        self.model = baseline_backtester.model
+        self.test_loader = baseline_backtester.test_loader
+        self.test_dates = baseline_backtester.test_dates
+        self.ret_scaler = baseline_backtester.ret_scaler
+        self.tickers = baseline_backtester.tickers
+        self.n_mc_samples = baseline_backtester.n_mc_samples
+        self.alpha = baseline_backtester.alpha
+
+        self.results: Optional[pd.DataFrame] = None
+        self.comparison_metrics: Optional[Dict] = None
+
+    def run(self) -> Tuple[pd.DataFrame, Dict]:
+        """
+        Run optimized backtester alongside baseline.
+
+        Returns
+        -------
+        Tuple[pd.DataFrame, Dict]
+            (detailed_results_df, comparison_metrics_dict)
+
+        detailed_results_df columns:
+            - date (index)
+            - baseline_return, optimized_return, optimized_weights_*
+            - baseline_var, optimized_var
+            - baseline_es, optimized_es
+            - actual_return (ground truth), breach_baseline, breach_optimized
+
+        comparison_metrics_dict:
+            - baseline_sharpe, optimized_sharpe, sharpe_improvement
+            - baseline_volatility, optimized_volatility, volatility_reduction
+            - baseline_max_dd, optimized_max_dd, dd_reduction
+            - baseline_cumulative_return, optimized_cumulative_return
+        """
+        logger.info("=" * 70)
+        logger.info("OPTIMIZED BACKTESTER: Computing optimal weights...")
+        logger.info("=" * 70)
+
+        self.model.eval()
+        self.model.to(self.device)
+
+        # Pre-compute h_t for all test days
+        logger.info("Pre-computing context vectors h_t for all %d test days...",
+                   len(self.test_dates))
+        all_h_t: List[torch.Tensor] = []
+        all_returns: List[np.ndarray] = []
+
+        with torch.no_grad():
+            for macro_seq, returns in self.test_loader:
+                macro_seq = macro_seq.to(self.device)
+                h_t, _ = self.model.tft(macro_seq)
+                all_h_t.append(h_t.cpu())
+                all_returns.append(returns.numpy())
+
+        all_h_t_tensor = torch.cat(all_h_t, dim=0)
+        all_returns_arr = np.concatenate(all_returns, axis=0)
+
+        # Unscale actual returns
+        actual_unscaled = self.ret_scaler.inverse_transform(all_returns_arr)
+
+        # Initialize optimizer
+        optimizer = self.PortfolioOptimizer(
+            n_assets=len(self.tickers),
+            alpha=self.alpha,
+            allow_short_selling=self.allow_short_selling,
+        )
+
+        # Storage for results
+        n_days = len(all_h_t_tensor)
+        baseline_returns: List[float] = []
+        optimized_returns: List[float] = []
+        optimized_weights_list: List[np.ndarray] = []
+        baseline_var_list: List[float] = []
+        baseline_es_list: List[float] = []
+        optimized_var_list: List[float] = []
+        optimized_es_list: List[float] = []
+
+        # Get baseline weights
+        baseline_weights = self.baseline_backtester.portfolio_weights
+
+        # Per-day optimization
+        logger.info("Optimizing weights for %d days (method='%s')...",
+                   n_days, self.optimization_method)
+        with torch.no_grad():
+            for i in tqdm(range(n_days), desc="Optimizing"):
+                h_t_i = all_h_t_tensor[i:i + 1].to(self.device)
+
+                # Draw MC samples
+                samples = self.model.flow.sample(
+                    self.n_mc_samples, context=h_t_i
+                ).cpu().numpy()
+                samples_unscaled = self.ret_scaler.inverse_transform(samples)
+
+                # Baseline metrics
+                baseline_var = compute_var(
+                    samples_unscaled, alpha=self.alpha,
+                    portfolio_weights=baseline_weights,
+                )
+                baseline_es = compute_es(
+                    samples_unscaled, alpha=self.alpha,
+                    portfolio_weights=baseline_weights,
+                )
+                baseline_var_list.append(baseline_var)
+                baseline_es_list.append(baseline_es)
+
+                # Optimize weights
+                if self.optimization_method == "cvar":
+                    opt_weights, _ = optimizer.optimize_cvar(
+                        samples_unscaled,
+                        initial_weights=baseline_weights,
+                    )
+                elif self.optimization_method == "sharpe":
+                    opt_weights, _ = optimizer.optimize_sharpe(
+                        samples_unscaled,
+                        initial_weights=baseline_weights,
+                    )
+                else:
+                    raise ValueError(f"Unknown optimization method: {self.optimization_method}")
+
+                optimized_weights_list.append(opt_weights)
+
+                # Optimized metrics
+                opt_var = compute_var(
+                    samples_unscaled, alpha=self.alpha,
+                    portfolio_weights=opt_weights,
+                )
+                opt_es = compute_es(
+                    samples_unscaled, alpha=self.alpha,
+                    portfolio_weights=opt_weights,
+                )
+                optimized_var_list.append(opt_var)
+                optimized_es_list.append(opt_es)
+
+                # Actual returns
+                actual_returns_day = actual_unscaled[i]
+                baseline_ret = float(actual_returns_day @ baseline_weights)
+                optimized_ret = float(actual_returns_day @ opt_weights)
+                baseline_returns.append(baseline_ret)
+                optimized_returns.append(optimized_ret)
+
+        # Assemble results DataFrame
+        baseline_returns = np.array(baseline_returns)
+        optimized_returns = np.array(optimized_returns)
+        baseline_var_list = np.array(baseline_var_list)
+        optimized_var_list = np.array(optimized_var_list)
+        baseline_es_list = np.array(baseline_es_list)
+        optimized_es_list = np.array(optimized_es_list)
+
+        breaches_baseline = (baseline_returns < baseline_var_list).astype(int)
+        breaches_optimized = (optimized_returns < optimized_var_list).astype(int)
+
+        results = pd.DataFrame({
+            "actual_port_return": baseline_returns,  # same for both strategies
+            "baseline_return": baseline_returns,
+            "optimized_return": optimized_returns,
+            "baseline_var": baseline_var_list,
+            "optimized_var": optimized_var_list,
+            "baseline_es": baseline_es_list,
+            "optimized_es": optimized_es_list,
+            "baseline_breach": breaches_baseline,
+            "optimized_breach": breaches_optimized,
+        }, index=self.test_dates[:n_days])
+
+        # Add individual asset returns
+        for j, ticker in enumerate(self.tickers):
+            results[f"{ticker}_actual"] = actual_unscaled[:n_days, j]
+
+        # Add optimized weights columns
+        weights_array = np.array(optimized_weights_list)
+        for j, ticker in enumerate(self.tickers):
+            results[f"weight_{ticker}"] = weights_array[:, j]
+
+        self.results = results
+        logger.info("Optimization complete. Generating comparison metrics...")
+
+        # Compare performance
+        comparison = self.DynamicPortfolioMetrics.compare_portfolios(
+            baseline_returns, optimized_returns
+        )
+        self.comparison_metrics = comparison
+
+        logger.info("=" * 70)
+        logger.info("OPTIMIZATION RESULTS SUMMARY")
+        logger.info("=" * 70)
+        logger.info("Baseline (Equal-Weight) vs Optimized (%s)", self.optimization_method.upper())
+        logger.info("-" * 70)
+        logger.info("Sharpe Ratio:        %.4f  →  %.4f  (Δ = %.4f)",
+                   comparison["baseline_sharpe"], comparison["optimized_sharpe"],
+                   comparison["sharpe_improvement"])
+        logger.info("Volatility (annual): %.2f%%  →  %.2f%%  (Δ = %.2f%%)",
+                   comparison["baseline_volatility"] * 100,
+                   comparison["optimized_volatility"] * 100,
+                   comparison["volatility_reduction"] * 100)
+        logger.info("Max Drawdown:        %.2f%%  →  %.2f%%  (Δ = %.2f%%)",
+                   comparison["baseline_max_dd"] * 100,
+                   comparison["optimized_max_dd"] * 100,
+                   comparison["dd_reduction"] * 100)
+        logger.info("Cumulative Return:   %.2f%%  →  %.2f%%  (Δ = %.2f%%)",
+                   comparison["baseline_cumulative_return"] * 100,
+                   comparison["optimized_cumulative_return"] * 100,
+                   comparison["return_improvement"] * 100)
+        logger.info("=" * 70)
+
+        return results, comparison
+
+    def plot_weight_evolution(
+        self,
+        output_path: Optional[str] = None,
+        figsize: Tuple[int, int] = (14, 8),
+    ) -> plt.Figure:
+        """
+        Plot how optimal portfolio weights evolve over time.
+
+        Shows whether the model converges to a stable allocation or
+        actively rebalances in response to changing macro regimes.
+
+        Parameters
+        ----------
+        output_path : str, optional
+            File path to save the figure.
+        figsize : tuple
+            Figure dimensions.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
+        if self.results is None:
+            raise RuntimeError("Must call run() before plot_weight_evolution()")
+
+        df = self.results
+        fig, axes = plt.subplots(len(self.tickers), 1, figsize=figsize, sharex=True)
+        if len(self.tickers) == 1:
+            axes = [axes]
+
+        for j, ticker in enumerate(self.tickers):
+            weight_col = f"weight_{ticker}"
+            ax = axes[j]
+            ax.plot(df.index, df[weight_col] * 100, linewidth=1.5, label=ticker)
+            ax.fill_between(df.index, 0, df[weight_col] * 100, alpha=0.3)
+            ax.set_ylabel(f"{ticker} Weight (%)")
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc="upper right")
+
+        axes[-1].set_xlabel("Date")
+        fig.suptitle(
+            f"Optimal Portfolio Weight Evolution ({self.optimization_method.upper()} Optimization)",
+            fontsize=14, fontweight="bold",
+        )
+        plt.tight_layout()
+
+        if output_path:
+            fig.savefig(output_path, dpi=120, bbox_inches="tight")
+            logger.info(f"Saved weight evolution plot to {output_path}")
+
+        return fig
+
+    def plot_return_comparison(
+        self,
+        output_path: Optional[str] = None,
+        figsize: Tuple[int, int] = (14, 6),
+    ) -> plt.Figure:
+        """
+        Plot cumulative returns: baseline vs optimized.
+
+        Parameters
+        ----------
+        output_path : str, optional
+        figsize : tuple
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+        """
+        if self.results is None:
+            raise RuntimeError("Must call run() before plot_return_comparison()")
+
+        df = self.results
+        baseline_cumret = self.DynamicPortfolioMetrics.compute_cumulative_returns(
+            df["baseline_return"].values
+        )
+        optimized_cumret = self.DynamicPortfolioMetrics.compute_cumulative_returns(
+            df["optimized_return"].values
+        )
+
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.plot(df.index, baseline_cumret * 100, linewidth=2, label="Baseline (Equal-Weight)",
+               color="#3a86ff")
+        ax.plot(df.index, optimized_cumret * 100, linewidth=2,
+               label=f"Optimized ({self.optimization_method.upper()})",
+               color="#fb8500")
+        ax.fill_between(df.index, baseline_cumret * 100, optimized_cumret * 100,
+                       alpha=0.2, color="gray")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Cumulative Return (%)")
+        ax.set_title("Baseline vs Optimized Portfolio: Cumulative Returns", fontweight="bold")
+        ax.legend(fontsize=11, loc="best")
+        ax.grid(True, alpha=0.3)
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=3))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
+        plt.tight_layout()
+
+        if output_path:
+            fig.savefig(output_path, dpi=120, bbox_inches="tight")
+            logger.info(f"Saved return comparison plot to {output_path}")
+
+        return fig
+
+    def summary(self) -> pd.DataFrame:
+        """
+        Generate a summary comparison table.
+
+        Returns
+        -------
+        pd.DataFrame
+            Comparison metrics (Baseline vs Optimized)
+        """
+        if self.comparison_metrics is None:
+            raise RuntimeError("Must call run() before summary()")
+
+        metrics = self.comparison_metrics
+        rows = [
+            ("Strategy", "Baseline (Equal-Weight)  |  Optimized"),
+            ("", ""),
+            ("Sharpe Ratio (Annual)", f"{metrics['baseline_sharpe']:.4f}  →  {metrics['optimized_sharpe']:.4f}"),
+            ("Sharpe Improvement", f"{metrics['sharpe_improvement']:+.4f}"),
+            ("", ""),
+            ("Volatility (Annual)", f"{metrics['baseline_volatility']*100:.2f}%  →  {metrics['optimized_volatility']*100:.2f}%"),
+            ("Volatility Reduction", f"{metrics['volatility_reduction']*100:+.2f}%"),
+            ("", ""),
+            ("Max Drawdown", f"{metrics['baseline_max_dd']*100:.2f}%  →  {metrics['optimized_max_dd']*100:.2f}%"),
+            ("Drawdown Reduction", f"{metrics['dd_reduction']*100:+.2f}%"),
+            ("", ""),
+            ("Cumulative Return", f"{metrics['baseline_cumulative_return']*100:.2f}%  →  {metrics['optimized_cumulative_return']*100:.2f}%"),
+            ("Return Improvement", f"{metrics['return_improvement']*100:+.2f}%"),
+        ]
+
+        return pd.DataFrame(rows, columns=["Metric", "Value"])
+

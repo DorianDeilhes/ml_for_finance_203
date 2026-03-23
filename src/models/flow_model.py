@@ -1,16 +1,9 @@
 """
 flow_model.py
 -------------
-Full Macro-Conditional Normalizing Flow: TFT Encoder + MAF Decoder.
-
-This module combines the Temporal Fusion Transformer (macro-regime encoder)
-with the Masked Autoregressive Flow (conditional density estimator) into a
-single end-to-end trainable model.
+Full macro-conditional normalizing flow: TFT encoder + MAF decoder.
 
     macro_seq → [TFT Encoder] → h_t → [MAF Decoder] → log p(X_t | h_t)
-
-Training: minimize Negative Log-Likelihood (NLL) = -E[log p(X_t | h_t)]
-Inference: sample from flow conditioned on h_t for Monte Carlo VaR/ES
 """
 
 from typing import Dict, Optional, Tuple
@@ -18,21 +11,20 @@ from typing import Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from src.models.tft import TemporalFusionTransformer
 from src.models.maf import MAFlow
+from src.models.tft import TemporalFusionTransformer
 
 
 class ConditionalNormalizingFlow(nn.Module):
     """
-    End-to-End Macro-Conditional Normalizing Flow for Portfolio Risk.
+    End-to-end macro-conditional normalizing flow for portfolio risk.
 
-    The model maps:
-        Input:  (batch, seq_len, num_macro_features)  — past macro history
-        Target: (batch, num_assets)                   — today's asset returns
+    The TFT reads a macro history sequence and produces a context vector h_t.
+    The MAF uses h_t to condition its affine transformations, adapting the
+    return distribution shape to the current macroeconomic regime.
 
-    The TFT reads the macro history and produces a compressed context vector h_t.
-    The MAF uses h_t to condition the affine transformations, allowing the
-    shape of the return distribution to adapt to the current macro regime.
+    Training objective: minimize NLL = -E[log p(X_t | h_t)].
+    Inference: sample from the flow conditioned on h_t for Monte Carlo VaR/ES.
 
     Parameters
     ----------
@@ -53,7 +45,7 @@ class ConditionalNormalizingFlow(nn.Module):
     flow_n_hidden : int
         Number of hidden layers inside each MADE.
     dropout : float
-        Dropout rate (applied in TFT and flow).
+        Dropout rate applied in both TFT and flow.
     """
 
     def __init__(
@@ -74,7 +66,6 @@ class ConditionalNormalizingFlow(nn.Module):
         self.num_assets = num_assets
         self.tft_d_model = tft_d_model
 
-        # ── Macro Encoder ─────────────────────────────────────────────────────
         self.tft = TemporalFusionTransformer(
             num_features=num_macro_features,
             d_model=tft_d_model,
@@ -82,14 +73,12 @@ class ConditionalNormalizingFlow(nn.Module):
             n_lstm_layers=tft_n_lstm_layers,
             dropout=dropout,
         )
-
-        # ── Conditional Normalizing Flow ──────────────────────────────────────
         self.flow = MAFlow(
             dim=num_assets,
             n_layers=flow_n_layers,
             hidden_dim=flow_hidden_dim,
             n_hidden=flow_n_hidden,
-            context_dim=tft_d_model,   # h_t dimension = TFT output dimension
+            context_dim=tft_d_model,
             use_batch_norm=True,
         )
 
@@ -116,8 +105,6 @@ class ConditionalNormalizingFlow(nn.Module):
         """
         Compute log p(X_t | M_{<t}) for a batch of (returns, macro_seq) pairs.
 
-        Used for computing the NLL training loss.
-
         Parameters
         ----------
         x : Tensor of shape (batch, num_assets)
@@ -129,7 +116,7 @@ class ConditionalNormalizingFlow(nn.Module):
         -------
         log_prob : Tensor of shape (batch,)
         """
-        h_t, _ = self.tft(macro_seq)       # (batch, d_model)
+        h_t, _ = self.tft(macro_seq)
         return self.flow.log_prob(x, context=h_t)
 
     def forward(
@@ -138,7 +125,7 @@ class ConditionalNormalizingFlow(nn.Module):
         macro_seq: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Forward pass: compute NLL loss and variable importance weights.
+        Compute NLL loss and variable importance weights.
 
         Parameters
         ----------
@@ -147,12 +134,11 @@ class ConditionalNormalizingFlow(nn.Module):
 
         Returns
         -------
-        nll : Tensor scalar — mean NLL over batch
+        nll : Tensor scalar — mean NLL over the batch.
         var_weights : Tensor of shape (batch, seq_len, num_macro_features)
         """
         h_t, var_weights = self.tft(macro_seq)
-        log_p = self.flow.log_prob(x, context=h_t)
-        nll = -log_p.mean()
+        nll = -self.flow.log_prob(x, context=h_t).mean()
         return nll, var_weights
 
     @torch.no_grad()
@@ -164,24 +150,20 @@ class ConditionalNormalizingFlow(nn.Module):
         """
         Draw Monte Carlo samples from p(X_t | M_{<t}).
 
-        Used for VaR and Expected Shortfall estimation in backtesting.
-
         Parameters
         ----------
         macro_seq : Tensor of shape (1, seq_len, num_macro_features)
-            Single macro sequence for a particular day t.
+            Macro sequence for a single day t.
         n_samples : int
             Number of Monte Carlo samples to draw.
 
         Returns
         -------
         samples : Tensor of shape (n_samples, num_assets)
-            Sampled asset returns from the conditional distribution.
         """
         self.eval()
-        h_t, _ = self.tft(macro_seq)                    # (1, d_model)
-        samples = self.flow.sample(n_samples, context=h_t)  # (n_samples, D)
-        return samples
+        h_t, _ = self.tft(macro_seq)
+        return self.flow.sample(n_samples, context=h_t)
 
     def get_variable_importance(
         self,
@@ -197,29 +179,22 @@ class ConditionalNormalizingFlow(nn.Module):
         Returns
         -------
         importance : Tensor of shape (num_macro_features,)
-            Average importance weight per feature, across batch and time.
+            Mean importance weight per feature across batch and time.
         """
         self.eval()
         with torch.no_grad():
-            _, var_weights = self.tft(macro_seq)   # (B, T, F)
-            importance = var_weights.mean(dim=(0, 1))  # (F,)
-        return importance
+            _, var_weights = self.tft(macro_seq)
+            return var_weights.mean(dim=(0, 1))
 
     def count_parameters(self) -> Dict[str, int]:
-        """Return parameter counts for each component."""
-        tft_params  = sum(p.numel() for p in self.tft.parameters()  if p.requires_grad)
+        """Return trainable parameter counts per component."""
+        tft_params = sum(p.numel() for p in self.tft.parameters() if p.requires_grad)
         flow_params = sum(p.numel() for p in self.flow.parameters() if p.requires_grad)
-        return {
-            "tft":   tft_params,
-            "flow":  flow_params,
-            "total": tft_params + flow_params,
-        }
+        return {"tft": tft_params, "flow": flow_params, "total": tft_params + flow_params}
 
 
 if __name__ == "__main__":
-    # Quick sanity check
-    B, T, F = 8, 63, 10   # batch, seq_len, features
-    D = 3                   # assets
+    B, T, F, D = 8, 63, 10, 3
 
     model = ConditionalNormalizingFlow(
         num_macro_features=F,
@@ -230,16 +205,14 @@ if __name__ == "__main__":
     )
 
     macro_seq = torch.randn(B, T, F)
-    returns   = torch.randn(B, D)
+    returns = torch.randn(B, D)
 
     nll, weights = model(returns, macro_seq)
-    print(f"NLL:            {nll.item():.4f}")
-    print(f"Weights shape:  {weights.shape}")    # Expected: (8, 63, 10)
+    print(f"NLL:           {nll.item():.4f}")
+    print(f"Weights shape: {weights.shape}")
 
-    # Sampling
     samples = model.sample(macro_seq[:1], n_samples=100)
-    print(f"Samples shape:  {samples.shape}")    # Expected: (100, 3)
+    print(f"Samples shape: {samples.shape}")
 
-    # Parameter count
     params = model.count_parameters()
     print(f"Parameters: TFT={params['tft']:,}, Flow={params['flow']:,}, Total={params['total']:,}")

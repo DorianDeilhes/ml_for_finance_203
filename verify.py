@@ -1,4 +1,7 @@
 """Quick verification script for all model components."""
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"  # Fix: prevent OpenMP dual-runtime conflict (libomp vs libiomp5md)
+
 import sys
 sys.path.insert(0, '.')
 import torch

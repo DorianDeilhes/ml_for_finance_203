@@ -1,16 +1,12 @@
 """
 market_data.py
 --------------
-Downloads daily adjusted close prices for SPY, TLT, and GLD from Yahoo Finance,
-computes daily log returns, and returns a clean DataFrame indexed by trading date.
-
-Usage:
-    from src.data.market_data import download_market_data
-    returns_df = download_market_data(start="2004-01-01", end="2024-01-01")
+Downloads daily adjusted close prices for SPY, TLT, and GLD from Yahoo Finance
+and computes daily log returns.
 """
 
 import logging
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 import pandas as pd
@@ -18,7 +14,6 @@ import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
-# Default asset universe
 DEFAULT_TICKERS: List[str] = ["SPY", "TLT", "GLD"]
 
 
@@ -33,7 +28,7 @@ def download_market_data(
     Parameters
     ----------
     tickers : list of str
-        List of Yahoo Finance ticker symbols.
+        Yahoo Finance ticker symbols.
     start : str
         Start date in 'YYYY-MM-DD' format (inclusive).
     end : str
@@ -42,48 +37,28 @@ def download_market_data(
     Returns
     -------
     pd.DataFrame
-        DataFrame of daily log returns for each ticker, indexed by date.
-        Index is a DatetimeIndex of trading days (UTC-normalized).
-        Shape: (T, D)  where D = len(tickers).
-        Column names are the ticker symbols.
-
-    Notes
-    -----
-    We compute log returns r_t = ln(P_t) - ln(P_{t-1}).
-    The first row (which would be NaN) is dropped.
+        Daily log returns r_t = ln(P_t) - ln(P_{t-1}), indexed by trading date.
+        Shape: (T, D) where D = len(tickers). Columns are ticker symbols.
     """
     logger.info("Downloading market data for %s from %s to %s", tickers, start, end)
 
-    # Download adjusted close prices
     raw = yf.download(
         tickers=tickers,
         start=start,
         end=end,
-        auto_adjust=True,   # Use adjusted close prices
+        auto_adjust=True,
         progress=False,
     )
 
-    # yfinance returns a MultiIndex if multiple tickers; extract 'Close'
     if isinstance(raw.columns, pd.MultiIndex):
         prices = raw["Close"][tickers]
     else:
-        # Single ticker case
         prices = raw[["Close"]]
         prices.columns = tickers
 
-    # Drop rows where all prices are NaN (e.g., market holidays)
-    prices = prices.dropna(how="all")
+    prices = prices.dropna(how="all").ffill()
 
-    # Forward-fill any remaining NaNs (minor gaps)
-    prices = prices.ffill()
-
-    # Compute daily log returns
-    log_returns = np.log(prices / prices.shift(1))
-
-    # Drop the first row (NaN from differencing)
-    log_returns = log_returns.iloc[1:]
-
-    # Normalize timezone information
+    log_returns = np.log(prices / prices.shift(1)).iloc[1:]
     log_returns.index = log_returns.index.tz_localize(None)
 
     logger.info(
@@ -104,12 +79,10 @@ def compute_rolling_realized_vol(
     """
     Compute rolling realized volatility for each asset.
 
-    Used as a high-frequency risk signal to supplement macro features.
-
     Parameters
     ----------
     returns : pd.DataFrame
-        Log returns DataFrame from `download_market_data`.
+        Log returns from `download_market_data`.
     window : int
         Rolling window in trading days (default: 21 ~ 1 month).
     annualize : bool
@@ -118,11 +91,12 @@ def compute_rolling_realized_vol(
     Returns
     -------
     pd.DataFrame
-        Rolling realized volatility, same index as `returns`.
+        Rolling realized volatility with the same index as `returns`.
+        Columns are renamed to '{ticker}_RealVol{window}d'.
     """
     vol = returns.rolling(window=window, min_periods=window // 2).std()
     if annualize:
-        vol = vol * np.sqrt(252)
+        vol *= np.sqrt(252)
     vol.columns = [f"{col}_RealVol{window}d" for col in returns.columns]
     return vol
 

@@ -1,26 +1,11 @@
 """
 maf.py
 ------
-Masked Autoregressive Flow (MAF) for Conditional Density Estimation.
+Masked Autoregressive Flow (MAF) for conditional density estimation.
 
-A Normalizing Flow transforms a simple base distribution (e.g., a standard
-Gaussian) into a complex, fat-tailed distribution via a sequence of invertible
-neural network layers.
-
-The key innovation of the MAF is the use of the MADE (Masked Autoencoder for
-Distribution Estimation) to enforce the autoregressive property:
-
-    x_i only depends on x_1, ..., x_{i-1}
-
-This ensures that the Jacobian of the transformation is strictly lower-triangular,
-making its determinant computable in O(D) rather than O(D^3):
-
-    det(J) = product of diagonal elements = product of exp(alpha_i)
-
-Architecture:
-    MADE:     Masked autoregressive network outputting (alpha, mu) for each dim.
-    MAFLayer: Affine transform: x_i = z_i * exp(alpha_i(x_{<i}; h)) + mu_i(x_{<i}; h)
-    MAFlow:   Stack of N MAFLayers with ordering reversal between layers.
+Implements a stack of invertible MADE-based affine layers. The autoregressive
+structure ensures a lower-triangular Jacobian, making log|det J| computable
+in O(D) rather than O(D^3).
 
 References:
     - Papamakarios et al. (2017): "Masked Autoregressive Flow for Density Estimation"
@@ -35,22 +20,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Masked Linear Layer
-# ─────────────────────────────────────────────────────────────────────────────
-
 class MaskedLinear(nn.Linear):
     """
-    A linear layer with a binary mask applied to the weight matrix.
-    Used to enforce the autoregressive property in MADE.
+    Linear layer with a binary mask applied to the weight matrix.
 
-    The mask ensures that output unit i can only receive information from
-    input units j where mask[i, j] = 1 (corresponding to x_{<i}).
+    Used to enforce the autoregressive property in MADE: output unit i
+    only receives information from input units j where mask[i, j] = 1.
     """
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
         super().__init__(in_features, out_features, bias)
-        # Register mask as a buffer (not a parameter — not updated by optimizer)
         self.register_buffer("mask", torch.ones(out_features, in_features))
 
     def set_mask(self, mask: torch.Tensor) -> None:
@@ -58,24 +37,16 @@ class MaskedLinear(nn.Linear):
         self.mask.data.copy_(mask)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Apply mask to weight matrix before computing linear transformation
         return F.linear(x, self.weight * self.mask, self.bias)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MADE (Masked Autoencoder for Distribution Estimation)
-# ─────────────────────────────────────────────────────────────────────────────
 
 class MADE(nn.Module):
     """
     Masked Autoencoder for Distribution Estimation (MADE).
 
-    A feedforward network with strategically masked weight matrices to enforce
-    the autoregressive ordering property: the output for dimension i depends
-    only on inputs 1, ..., i-1.
-
-    When conditioned on an external context h_t (from the TFT), the context
-    is concatenated to the input before the first masked layer.
+    A feedforward network with masked weights enforcing the autoregressive
+    ordering: output for dimension i depends only on inputs 1, ..., i-1.
+    An external context vector h_t can be injected by concatenation.
 
     Parameters
     ----------
@@ -88,7 +59,7 @@ class MADE(nn.Module):
     context_dim : int, optional
         Dimensionality of the conditioning context vector h_t.
     activation : str
-        Activation function ('relu', 'tanh', 'elu').
+        Activation function: 'relu', 'tanh', or 'elu'.
     """
 
     def __init__(
@@ -101,35 +72,24 @@ class MADE(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.input_dim   = input_dim
-        self.hidden_dim  = hidden_dim
-        self.n_hidden    = n_hidden
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.n_hidden = n_hidden
         self.context_dim = context_dim
 
-        # Context projection: h_t → context_dim (if provided)
         self.context_proj: Optional[nn.Linear] = None
         effective_input = input_dim
         if context_dim is not None:
-            # Project context to same size as input for concatenation
             self.context_proj = nn.Linear(context_dim, context_dim)
             effective_input = input_dim + context_dim
 
-        # Build masked layers
-        # Sizes: [effective_input, hidden, ..., hidden, 2*input_dim]
-        # The final layer outputs (alpha, mu) for each of D dimensions
         layer_sizes = [effective_input] + [hidden_dim] * n_hidden + [input_dim * 2]
+        self.layers = nn.ModuleList([
+            MaskedLinear(in_sz, out_sz)
+            for in_sz, out_sz in zip(layer_sizes[:-1], layer_sizes[1:])
+        ])
 
-        self.layers = nn.ModuleList()
-        for in_sz, out_sz in zip(layer_sizes[:-1], layer_sizes[1:]):
-            self.layers.append(MaskedLinear(in_sz, out_sz))
-
-        self.activation = {
-            "relu": F.relu,
-            "tanh": torch.tanh,
-            "elu":  F.elu,
-        }[activation]
-
-        # Assign and set masks
+        self.activation = {"relu": F.relu, "tanh": torch.tanh, "elu": F.elu}[activation]
         self._setup_masks(effective_input, hidden_dim, input_dim)
 
     def _setup_masks(
@@ -141,60 +101,36 @@ class MADE(nn.Module):
         """
         Construct autoregressive masks for each MADE layer.
 
-        Each unit in each layer is assigned an ordering number m(k) between
-        1 and D-1. Connections are only allowed from units with lower order
-        to units with equal-or-higher order.
-
-        For the output layer, we enforce STRICT inequality (output_i only
-        sees input with order < i), giving us the lower-triangular Jacobian.
+        Each unit is assigned a degree m(k) in [1, D-1]. A connection from
+        unit j to unit i is allowed only if m(j) <= m(i) for hidden layers,
+        and m(j) < m(i) for the output layer (strict lower-triangular Jacobian).
+        Context units are assigned degree 0 so they are visible to all units.
         """
         input_dim = self.input_dim
         context_dim = self.context_dim if self.context_dim is not None else 0
 
-        # Assign degree to each input unit
-        # Context units get degree 0 (always visible to all)
         if context_dim > 0:
             m_input = np.concatenate([
-                np.zeros(context_dim, dtype=int),        # context: degree 0
-                np.arange(1, input_dim + 1, dtype=int),  # x dims: degree 1..D
+                np.zeros(context_dim, dtype=int),
+                np.arange(1, input_dim + 1, dtype=int),
             ])
         else:
             m_input = np.arange(1, input_dim + 1, dtype=int)
 
-        # Hidden layer degrees: randomly chosen in [1, D-1] for each unit
         rng = np.random.default_rng(seed=42)
-        m_hidden = [rng.integers(low=1, high=input_dim, size=self.hidden_dim, endpoint=False)
-                    for _ in range(self.n_hidden)]
+        m_hidden = [
+            rng.integers(low=1, high=input_dim, size=self.hidden_dim, endpoint=False)
+            for _ in range(self.n_hidden)
+        ]
 
-        # Output layer degrees: first D outputs are alpha, next D are mu.
-        # Because forward() does `alpha, mu = h.chunk(2, dim=-1)`, degrees must be
-        # [0..D-1, 0..D-1] so alpha_i and mu_i share the same autoregressive order.
-        m_output = np.concatenate([
-            np.arange(0, input_dim),
-            np.arange(0, input_dim),
-        ])
+        # alpha and mu share the same autoregressive order (degrees 0..D-1 each)
+        m_output = np.concatenate([np.arange(0, input_dim), np.arange(0, input_dim)])
 
-        # Build mask for each layer
         all_m = [m_input] + m_hidden + [m_output]
-        actual_layer_idx = 0
-
         for i, layer in enumerate(self.layers):
-            m_prev = all_m[i]
-            m_curr = all_m[i + 1]
-
-            # Hidden layer: m_curr >= m_prev (non-strict)
-            # Output layer: m_curr >= m_prev (but output ordering is 0..D-1 vs input 1..D)
-            # This naturally gives strict lower-triangular Jacobian for outputs
-            is_output = (i == len(self.layers) - 1)
-            if is_output:
-                # Strict: output i (degree i-1) only sees input j (degree ≤ i-1)
-                mask = torch.tensor(
-                    (m_curr[:, None] >= m_prev[None, :]).astype(np.float32)
-                )
-            else:
-                mask = torch.tensor(
-                    (m_curr[:, None] >= m_prev[None, :]).astype(np.float32)
-                )
+            mask = torch.tensor(
+                (all_m[i + 1][:, None] >= all_m[i][None, :]).astype(np.float32)
+            )
             layer.set_mask(mask)
 
     def forward(
@@ -208,56 +144,38 @@ class MADE(nn.Module):
         Parameters
         ----------
         x : Tensor of shape (batch, D)
-            The input values (used as conditioning for subsequent dimensions).
         context : Tensor of shape (batch, context_dim), optional
-            The macro context vector h_t from the TFT.
 
         Returns
         -------
-        alpha : Tensor of shape (batch, D)
-            Log-scale parameters for the affine transform.
-        mu : Tensor of shape (batch, D)
-            Shift parameters for the affine transform.
+        alpha : Tensor of shape (batch, D) — log-scale parameters.
+        mu : Tensor of shape (batch, D) — shift parameters.
         """
-        # Concatenate context if provided
         if context is not None and self.context_proj is not None:
-            ctx = self.context_proj(context)
-            h = torch.cat([ctx, x], dim=-1)
+            h = torch.cat([self.context_proj(context), x], dim=-1)
         else:
             h = x
 
-        # Forward pass through masked layers
         for i, layer in enumerate(self.layers):
             h = layer(h)
             if i < len(self.layers) - 1:
                 h = self.activation(h)
 
-        # Output: split into alpha and mu (both shape: batch, D)
         alpha, mu = h.chunk(2, dim=-1)
-
-        # Smoothly bound alpha to keep exp(alpha) numerically stable.
-        alpha = 3.0 * torch.tanh(alpha / 3.0)
-
+        alpha = 3.0 * torch.tanh(alpha / 3.0)  # bound alpha for numerical stability
         return alpha, mu
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MAF Layer (Single Autoregressive Flow Step)
-# ─────────────────────────────────────────────────────────────────────────────
-
 class MAFLayer(nn.Module):
     """
-    A single step of the Masked Autoregressive Flow.
+    Single step of the Masked Autoregressive Flow.
 
-    Implements the affine transformation:
-        Forward (data → noise):   z_i = (x_i - mu_i(x_{<i}; h)) * exp(-alpha_i(x_{<i}; h))
-        Inverse (noise → data):   x_i = z_i * exp(alpha_i) + mu_i
+    Affine transformation:
+        Forward (data → noise):  z_i = (x_i - mu_i(x_{<i}; h)) * exp(-alpha_i(x_{<i}; h))
+        Inverse (noise → data):  x_i = z_i * exp(alpha_i) + mu_i
 
-    The log Jacobian determinant (needed for NLL) is:
-        log|det J| = -sum_i(alpha_i)    [triangular, O(D) computation]
-
-    Note: The FORWARD direction (x → z) is used during TRAINING (density estimation).
-          The INVERSE direction (z → x) is used during SAMPLING (Monte Carlo).
+    Log Jacobian determinant:
+        log|det J| = -sum_i(alpha_i)   [triangular, O(D)]
 
     Parameters
     ----------
@@ -292,7 +210,7 @@ class MAFLayer(nn.Module):
         context: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Map data x → noise z (used during training for NLL computation).
+        Map data x → noise z (training direction, used for NLL computation).
 
         Parameters
         ----------
@@ -301,13 +219,11 @@ class MAFLayer(nn.Module):
 
         Returns
         -------
-        z : Tensor of shape (batch, D)  — noise in base distribution space
-        log_det_J : Tensor of shape (batch,)  — log |det Jacobian|
+        z : Tensor of shape (batch, D)
+        log_det_J : Tensor of shape (batch,)
         """
         alpha, mu = self.made(x, context)
-        # x → z: invert the affine transform
         z = (x - mu) * torch.exp(-alpha)
-        # log|det J| = sum of -alpha over dimensions (triangular Jacobian)
         log_det_J = -alpha.sum(dim=-1)
         return z, log_det_J
 
@@ -318,10 +234,10 @@ class MAFLayer(nn.Module):
         context: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Map noise z → data x (used during Monte Carlo sampling).
+        Map noise z → data x (sampling direction).
 
-        The inverse pass is SEQUENTIAL (autoregressive) — x_i must be
-        computed before x_{i+1}. This takes O(D) MADE evaluations.
+        Sequential by nature: x_i must be computed before x_{i+1},
+        requiring D forward passes through MADE.
 
         Parameters
         ----------
@@ -332,63 +248,58 @@ class MAFLayer(nn.Module):
         -------
         x : Tensor of shape (batch, D)
         """
-        D = z.shape[-1]
         x = torch.zeros_like(z)
-        for i in range(D):
+        for i in range(z.shape[-1]):
             alpha, mu = self.made(x, context)
-            # Recover x_i from z_i using the affine transform
             x[:, i] = z[:, i] * torch.exp(alpha[:, i]) + mu[:, i]
         return x
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Batch Normalization for Flows
-# ─────────────────────────────────────────────────────────────────────────────
-
 class FlowBatchNorm(nn.Module):
     """
-    Invertible Batch Normalization for Normalizing Flows.
+    Invertible batch normalization for normalizing flows.
 
-    Standard BatchNorm is not directly invertible during inference. This
-    implementation uses running statistics so the forward and inverse passes
-    are always consistent.
+    Uses running statistics to keep forward and inverse passes consistent
+    at inference time. Stabilizes training between flow layers.
 
-    This stabilizes training by normalizing activations between flow layers.
+    Parameters
+    ----------
+    dim : int
+        Feature dimensionality.
+    eps : float
+        Numerical stability constant.
+    momentum : float
+        Running statistics momentum.
     """
 
     def __init__(self, dim: int, eps: float = 1e-5, momentum: float = 0.1) -> None:
         super().__init__()
         self.eps = eps
         self.momentum = momentum
-        self.gamma = nn.Parameter(torch.zeros(dim))     # log scale
-        self.beta  = nn.Parameter(torch.zeros(dim))     # shift
+        self.gamma = nn.Parameter(torch.zeros(dim))
+        self.beta = nn.Parameter(torch.zeros(dim))
         self.register_buffer("running_mean", torch.zeros(dim))
-        self.register_buffer("running_var",  torch.ones(dim))
+        self.register_buffer("running_var", torch.ones(dim))
 
     def forward(
         self,
         x: torch.Tensor,
         context: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Normalize x → z, return log_det_J."""
+        """Normalize x → z and return log_det_J."""
         if self.training:
             mean = x.mean(0)
-            var  = x.var(0, unbiased=False)
-            # Update running stats
+            var = x.var(0, unbiased=False)
             self.running_mean = (1 - self.momentum) * self.running_mean + self.momentum * mean.detach()
-            self.running_var  = (1 - self.momentum) * self.running_var  + self.momentum * var.detach()
+            self.running_var = (1 - self.momentum) * self.running_var + self.momentum * var.detach()
         else:
-            mean = self.running_mean
-            var  = self.running_var
+            mean, var = self.running_mean, self.running_var
 
         x_hat = (x - mean) / torch.sqrt(var + self.eps)
         z = x_hat * torch.exp(self.gamma) + self.beta
 
-        # log|det J| = sum(gamma) - 0.5 * sum(log(var + eps))
         log_det_J = (self.gamma - 0.5 * torch.log(var + self.eps)).sum()
-        log_det_J = log_det_J.expand(x.shape[0])
-
-        return z, log_det_J
+        return z, log_det_J.expand(x.shape[0])
 
     @torch.no_grad()
     def inverse(
@@ -396,32 +307,25 @@ class FlowBatchNorm(nn.Module):
         z: torch.Tensor,
         context: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Invert BatchNorm: z → x."""
+        """Invert batch normalization: z → x."""
         x_hat = (z - self.beta) * torch.exp(-self.gamma)
-        x = x_hat * torch.sqrt(self.running_var + self.eps) + self.running_mean
-        return x
+        return x_hat * torch.sqrt(self.running_var + self.eps) + self.running_mean
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Full Masked Autoregressive Flow (stacked MAF layers)
-# ─────────────────────────────────────────────────────────────────────────────
 
 class MAFlow(nn.Module):
     """
-    Full Masked Autoregressive Flow: a stack of invertible MAF layers.
+    Full Masked Autoregressive Flow: a stack of MAFLayer steps.
 
-    Design choices:
-    - Between each MAFLayer, we reverse the ordering of dimensions.
-      This ensures each dimension gets to "condition" on others across layers.
-    - FlowBatchNorm is applied between MAFLayers to stabilize gradients.
-    - The base distribution is a standard multivariate Gaussian: Z ~ N(0, I).
+    Dimension ordering is reversed between successive MAFLayers so that each
+    dimension conditions on different subsets across layers. FlowBatchNorm
+    is optionally inserted between layers to stabilize gradients.
 
     Parameters
     ----------
     dim : int
-        Dimensionality of the input data (D = number of assets, e.g., 3).
+        Dimensionality of the input data (D = number of assets).
     n_layers : int
-        Number of MAFLayer steps in the flow.
+        Number of MAFLayer steps.
     hidden_dim : int
         Hidden dimension inside each MADE network.
     n_hidden : int
@@ -446,26 +350,14 @@ class MAFlow(nn.Module):
         self.dim = dim
         self.n_layers = n_layers
 
-        # Build alternating MAFLayer + optional FlowBatchNorm
         self.layers = nn.ModuleList()
         for i in range(n_layers):
-            self.layers.append(
-                MAFLayer(
-                    dim=dim,
-                    hidden_dim=hidden_dim,
-                    n_hidden=n_hidden,
-                    context_dim=context_dim,
-                )
-            )
+            self.layers.append(MAFLayer(dim=dim, hidden_dim=hidden_dim,
+                                        n_hidden=n_hidden, context_dim=context_dim))
             if use_batch_norm and i < n_layers - 1:
                 self.layers.append(FlowBatchNorm(dim))
 
-        # Flip indices (dimension ordering) applied between successive MAFLayers
-        # This ensures each dimension gets a chance to condition on others
-        self.register_buffer(
-            "flip_idx",
-            torch.arange(dim - 1, -1, -1)
-        )
+        self.register_buffer("flip_idx", torch.arange(dim - 1, -1, -1))
 
     def log_prob(
         self,
@@ -473,16 +365,11 @@ class MAFlow(nn.Module):
         context: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Compute the exact log-likelihood of data x under the flow.
-
-        This is the FAST direction for MAF (density estimation at train time).
+        Compute exact log-likelihood of x under the flow.
 
         log p(x|h) = log p_Z(g(x; h)) + log|det J_g(x; h)|
 
-        where:
-            g = the inverse flow (data → noise)
-            p_Z = standard Gaussian density
-            log|det J| = sum of log-diagonal-Jacobians across all MAFLayers
+        where g is the data→noise direction and p_Z = N(0, I).
 
         Parameters
         ----------
@@ -504,16 +391,15 @@ class MAFlow(nn.Module):
                 z, log_det = layer(z, context)
                 log_det_total = log_det_total + log_det
                 flip = not flip
-            else:  # FlowBatchNorm
+            else:
                 z, log_det = layer(z, context)
                 log_det_total = log_det_total + log_det
 
-        # Base distribution: standard multivariate Gaussian log-density
-        # log p_Z(z) = -D/2 * log(2π) - 0.5 * ||z||^2
         D = x.shape[-1]
-        log_pz = (-0.5 * D * torch.log(torch.tensor(2.0 * torch.pi, device=x.device))
-                  - 0.5 * (z ** 2).sum(dim=-1))
-
+        log_pz = (
+            -0.5 * D * torch.log(torch.tensor(2.0 * torch.pi, device=x.device))
+            - 0.5 * (z ** 2).sum(dim=-1)
+        )
         return log_pz + log_det_total
 
     @torch.no_grad()
@@ -524,19 +410,16 @@ class MAFlow(nn.Module):
         device: Optional[torch.device] = None,
     ) -> torch.Tensor:
         """
-        Generate samples from the learned distribution via inverse flow.
+        Generate samples via the inverse flow: z ~ N(0, I) → x = f^{-1}(z; h).
 
-        z ~ N(0, I)  →  x = f^{-1}(z; h)
-
-        The inverse for MAF is SEQUENTIAL (slow, O(D) × n_layers passes),
-        but only needed during inference/Monte Carlo, not training.
+        The inverse is sequential — O(D) × n_layers MADE passes. Only used
+        at inference time for Monte Carlo risk estimation.
 
         Parameters
         ----------
         n_samples : int
             Number of samples to draw.
-        context : Tensor of shape (1, context_dim) or (n_samples, context_dim)
-            Conditioning context (broadcast if shape is (1, ...)).
+        context : Tensor of shape (1, context_dim) or (n_samples, context_dim), optional
 
         Returns
         -------
@@ -545,14 +428,11 @@ class MAFlow(nn.Module):
         if device is None:
             device = next(self.parameters()).device
 
-        # Sample from base distribution
         z = torch.randn(n_samples, self.dim, device=device)
 
-        # Broadcast context if single vector provided
         if context is not None and context.shape[0] == 1:
             context = context.expand(n_samples, -1)
 
-        # Apply inverse flow in REVERSE order
         flip = (sum(1 for l in self.layers if isinstance(l, MAFLayer)) % 2 == 0)
         for layer in reversed(self.layers):
             if isinstance(layer, MAFLayer):
@@ -560,28 +440,22 @@ class MAFlow(nn.Module):
                 if flip:
                     z = z[:, self.flip_idx]
                 flip = not flip
-            else:  # FlowBatchNorm
+            else:
                 z = layer.inverse(z, context)
 
         return z
 
 
 if __name__ == "__main__":
-    # Sanity check
-    D = 3   # 3 assets
-    B = 32  # Batch size
-    context_dim = 64
-
+    D, B, context_dim = 3, 32, 64
     flow = MAFlow(dim=D, n_layers=5, hidden_dim=64, context_dim=context_dim)
     x = torch.randn(B, D)
     h = torch.randn(B, context_dim)
 
     log_p = flow.log_prob(x, context=h)
-    print(f"log_prob shape: {log_p.shape}")       # Expected: (32,)
-    print(f"NLL (mean): {-log_p.mean().item():.4f}")
+    print(f"log_prob shape: {log_p.shape}")
+    print(f"NLL (mean):     {-log_p.mean().item():.4f}")
 
     samples = flow.sample(n_samples=100, context=h[:1])
-    print(f"samples shape: {samples.shape}")      # Expected: (100, 3)
-
-    total_params = sum(p.numel() for p in flow.parameters() if p.requires_grad)
-    print(f"Total Flow parameters: {total_params:,}")
+    print(f"samples shape:  {samples.shape}")
+    print(f"Parameters:     {sum(p.numel() for p in flow.parameters() if p.requires_grad):,}")

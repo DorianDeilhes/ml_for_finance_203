@@ -129,7 +129,8 @@ class MADE(nn.Module):
         all_m = [m_input] + m_hidden + [m_output]
         for i, layer in enumerate(self.layers):
             mask = torch.tensor(
-                (all_m[i + 1][:, None] >= all_m[i][None, :]).astype(np.float32)
+                (all_m[i + 1][:, None] >= all_m[i][None, :]).astype(np.float32),
+                dtype=torch.float32,
             )
             layer.set_mask(mask)
 

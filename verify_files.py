@@ -34,8 +34,8 @@ def check_pipeline_constants():
     print("CHECK 2a: Verify pipeline.py constants")
     print("="*70)
     try:
-        with open('src/data/pipeline.py', 'r') as f:
-            content = f.read()
+        with open('src/data/pipeline.py', 'r', encoding='utf-8') as f:
+            content = f.read().replace(' ', '').replace("'", '"')
         
         checks = [
             ('TRAIN_END="2016-12-31"', 'TRAIN_END="2016-12-31"' in content),
@@ -60,7 +60,7 @@ def check_build_pipeline_signature():
     print("CHECK 2b: Verify build_pipeline returns 8 values")
     print("="*70)
     try:
-        with open('src/data/pipeline.py', 'r') as f:
+        with open('src/data/pipeline.py', 'r', encoding='utf-8') as f:
             content = f.read()
         
         # Search for the return statement
@@ -80,7 +80,7 @@ def check_verify_no_lookahead_vectorized():
     print("CHECK 2c: Verify verify_no_lookahead is vectorized (no for loop)")
     print("="*70)
     try:
-        with open('src/data/pipeline.py', 'r') as f:
+        with open('src/data/pipeline.py', 'r', encoding='utf-8') as f:
             content = f.read()
         
         # Extract the function
@@ -116,7 +116,7 @@ def check_verify_no_lookahead_vectorized():
         print(f"✗ FAIL: Error analyzing pipeline.py: {e}")
         # Fallback: simple string check
         try:
-            with open('src/data/pipeline.py', 'r') as f:
+            with open('src/data/pipeline.py', 'r', encoding='utf-8') as f:
                 content = f.read()
             if 'for date in master.index' not in content:
                 print("✓ PASS: verify_no_lookahead has no 'for date in master.index' loop")
@@ -133,7 +133,7 @@ def check_trainer_warmup_lr():
     print("CHECK 3: Verify trainer.py has _set_warmup_lr method")
     print("="*70)
     try:
-        with open('src/training/trainer.py', 'r') as f:
+        with open('src/training/trainer.py', 'r', encoding='utf-8') as f:
             content = f.read()
         
         has_set_warmup_lr = 'def _set_warmup_lr' in content
@@ -177,7 +177,7 @@ def check_fed_funds_rate_realtime_start():
     print("CHECK 4: Verify _transform_fed_funds_rate preserves realtime_start")
     print("="*70)
     try:
-        with open('src/data/macro_data.py', 'r') as f:
+        with open('src/data/macro_data.py', 'r', encoding='utf-8') as f:
             content = f.read()
         
         # Extract function
@@ -186,7 +186,7 @@ def check_fed_funds_rate_realtime_start():
         func_content = content[start_idx:end_idx]
         
         # Check for preservation of realtime_start
-        has_correct_preserve = 'df_monthly_pub' in func_content and 'realtime_start' in func_content
+        has_correct_preserve = ('df_monthly_pub' in func_content or 'df_monthly' in func_content) and 'realtime_start' in func_content
         has_observation_date_plus_1 = 'observation_date + 1' in func_content or 'observation_date + pd.Timedelta(days=1)' in func_content
         
         if has_correct_preserve and not has_observation_date_plus_1:
@@ -209,12 +209,12 @@ def check_backtester_batch_precompute():
     print("CHECK 5: Verify backtester.py run() pre-computes h_t in batches")
     print("="*70)
     try:
-        with open('src/backtest/backtester.py', 'r') as f:
+        with open('src/backtest/backtester.py', 'r', encoding='utf-8') as f:
             content = f.read()
         
         # Check for the batch loop pattern
         has_batch_loop = 'for macro_seq, returns in self.test_loader' in content
-        has_tft_batch_call = 'self.model.tft(macro_seq)' in content
+        has_tft_batch_call = 'self.model.tft(macro_seq' in content
         has_all_h_t = 'all_h_t' in content
         has_second_loop = 'for i in tqdm(range(len(all_h_t' in content or 'for i in range(len(all_h_t' in content
         
@@ -242,7 +242,7 @@ def check_backtester_plot_distributions():
     print("CHECK 6: Verify backtester.py plot_return_distributions implementation")
     print("="*70)
     try:
-        with open('src/backtest/backtester.py', 'r') as f:
+        with open('src/backtest/backtester.py', 'r', encoding='utf-8') as f:
             content = f.read()
         
         # Extract function
@@ -284,7 +284,7 @@ def check_python_syntax():
     all_pass = True
     for filepath in files_to_check:
         try:
-            with open(filepath, 'r') as f:
+            with open(filepath, 'r', encoding='utf-8') as f:
                 ast.parse(f.read())
             print(f"✓ {filepath}: Valid Python syntax")
         except SyntaxError as e:

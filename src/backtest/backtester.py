@@ -3,27 +3,10 @@
 backtester.py
 
 -------------
+Out-of-sample backtester for the macro-conditional normalizing flow.
 
-Out-of-Sample Financial Backtester for Portfolio Risk Management.
-
-
-
-For each trading day in the test set, uses the trained ConditionalNormalizingFlow
-
-to:
-
-1. Encode the macro context h_t via the TFT.
-
-2. Draw 10,000 Monte Carlo samples from the conditional distribution p(X_t | h_t).
-
-3. Compute portfolio VaR (99%) and Expected Shortfall from those samples.
-
-4. Record whether the actual portfolio return breached the VaR (a "breach").
-
-5. Run Kupiec's POF test on the full breach series.
-
-6. Generate visualization plots (VaR bands vs actual returns, breach markers).
-
+Runs the trained model on the test set to produce daily VaR and ES estimates,
+detects breaches, and validates calibration via Kupiec's POF test.
 """
 
 
@@ -50,23 +33,14 @@ from tqdm import tqdm
 
 
 
-from src.models.flow_model import ConditionalNormalizingFlow
-
 from src.backtest.risk_metrics import (
-
-    compute_var,
-
-    compute_es,
-
-    kupiec_pof_test,
-
-    compute_portfolio_stats,
-
     KupiecResult,
-
+    compute_es,
+    compute_var,
+    compute_portfolio_stats,
+    kupiec_pof_test,
 )
-
-
+from src.models.flow_model import ConditionalNormalizingFlow
 
 logger = logging.getLogger(__name__)
 
@@ -77,10 +51,12 @@ logger = logging.getLogger(__name__)
 class Backtester:
 
     """
+    Out-of-sample backtester for the ConditionalNormalizingFlow.
 
-    Out-of-Sample Backtester for the Conditional Normalizing Flow.
-
-
+    For each test day, encodes the macro context via the TFT, draws Monte Carlo
+    samples from the conditional distribution, computes VaR and ES, and records
+    whether the actual return breached the VaR. Runs Kupiec's POF test on the
+    full breach series.
 
     Parameters
 
@@ -91,17 +67,11 @@ class Backtester:
         Trained model (best checkpoint should be loaded before calling run()).
 
     test_loader : DataLoader
-
-        Test set DataLoader (macro_seq, returns) -- must NOT be shuffled.
-
+        Test set DataLoader yielding (macro_seq, returns). Must not be shuffled.
     test_dates : np.ndarray
-
-        Array of dates corresponding to each test observation.
-
+        Dates corresponding to each test observation.
     ret_scaler : StandardScaler
-
-        The scaler used on returns (needed to invert scaling for actual $ metrics).
-
+        Scaler used on returns, applied in inverse to recover original scale.
     tickers : list of str
 
         Asset names for labeling.
@@ -111,17 +81,11 @@ class Backtester:
         Number of Monte Carlo samples per day.
 
     alpha : float
-
-        VaR confidence level tail probability (default: 0.01 for 99% VaR).
-
+        VaR tail probability (default: 0.01 for 99% VaR).
     portfolio_weights : np.ndarray, optional
-
-        Asset weights (default: equal).
-
+        Asset weights. Defaults to equal weighting.
     device : torch.device, optional
-
-        Device to run inference on.
-
+        Inference device. Defaults to CUDA if available, else CPU.
     """
 
 
@@ -153,11 +117,8 @@ class Backtester:
         self.model = model
 
         self.test_loader = test_loader
-
-        self.test_dates  = pd.to_datetime(test_dates)
-
-        self.ret_scaler  = ret_scaler
-
+        self.test_dates = pd.to_datetime(test_dates)
+        self.ret_scaler = ret_scaler
         self.tickers = tickers
 
         self.n_mc_samples = n_mc_samples
@@ -184,14 +145,7 @@ class Backtester:
 
 
 
-        # Results storage
-
         self.results: Optional[pd.DataFrame] = None
-
-        # MC portfolio-return samples stored for a handful of representative days
-
-        # (used by plot_return_distributions)
-
         self._stored_port_samples: dict = {}
 
 
@@ -204,48 +158,28 @@ class Backtester:
 
 
 
-        Optimisation: the TFT encoder is run in batches over the entire test set
-
-        first to pre-compute all context vectors h_t, then per-day MAF sampling
-
-        is performed using those cached vectors.  This eliminates the overhead of
-
-        running the (relatively heavy) TFT once per day inside the inner loop.
-
-
+        TFT encoding is batched over the entire test set first to pre-compute
+        all context vectors h_t. Per-day MAF sampling then uses these cached
+        vectors, avoiding redundant TFT passes in the inner loop.
 
         Returns
 
         -------
 
         pd.DataFrame
-
-            Backtest results indexed by date. Columns:
-
-            - actual_port_return: true portfolio return that day
-
-            - var_99: predicted 99% VaR
-
-            - es_99: predicted 99% ES
-
-            - breach: 1 if actual < var_99, else 0
-
-            - var_99_pct, es_99_pct: in percentage form
-
-            - individual asset returns: SPY_actual, TLT_actual, GLD_actual
-
+            Backtest results indexed by date. Columns include actual portfolio
+            return, var_99, es_99, breach flag, percentage forms, and per-asset
+            actual returns.
         """
 
         self.model.eval()
 
         self.model.to(self.device)
 
-
-
-        # -- Step 1: batch-encode all macro sequences -> collect h_t and returns --
-
-        logger.info("Pre-computing context vectors h_t for all %d test days...", len(self.test_dates))
-
+        logger.info(
+            "Pre-computing context vectors h_t for all %d test days...",
+            len(self.test_dates),
+        )
         all_h_t: List[torch.Tensor] = []
 
         all_returns: List[np.ndarray] = []
@@ -255,24 +189,13 @@ class Backtester:
         with torch.no_grad():
 
             for macro_seq, returns in self.test_loader:
-
-                macro_seq = macro_seq.to(self.device)
-
-                h_t, _ = self.model.tft(macro_seq)   # (batch, d_model)
-
+                h_t, _ = self.model.tft(macro_seq.to(self.device))
                 all_h_t.append(h_t.cpu())
 
                 all_returns.append(returns.numpy())
 
-
-
-        all_h_t_tensor = torch.cat(all_h_t, dim=0)          # (N, d_model)
-
-        all_returns_arr = np.concatenate(all_returns, axis=0) # (N, D)
-
-
-
-        # -- Step 2: per-day MAF sampling using cached h_t --------------------
+        all_h_t_tensor = torch.cat(all_h_t, dim=0)
+        all_returns_arr = np.concatenate(all_returns, axis=0)
 
         logger.info(
 
@@ -283,70 +206,32 @@ class Backtester:
         )
 
         var_list: List[float] = []
-
-        es_list:  List[float] = []
-
-
-
-        # Choose up to 3 breach days + 3 calm days to store full samples for plots
-
-        # (decided after run() completes, so we do a two-pass store below)
-
-        _port_sample_store: dict = {}  # date_idx -> 1-D portfolio return samples
-
-
+        es_list: List[float] = []
+        _port_sample_store: dict = {}
 
         with torch.no_grad():
 
             for i in tqdm(range(len(all_h_t_tensor)), desc="Backtesting"):
-
-                h_t_i = all_h_t_tensor[i:i+1].to(self.device)   # (1, d_model)
-
+                h_t_i = all_h_t_tensor[i:i + 1].to(self.device)
                 samples = self.model.flow.sample(
 
                     self.n_mc_samples, context=h_t_i
-
-                ).cpu().numpy()  # (n_samples, D)
-
-
-
+                ).cpu().numpy()
                 samples_unscaled = self.ret_scaler.inverse_transform(samples)
 
 
 
-                var = compute_var(
-
+                var_list.append(compute_var(
                     samples_unscaled, alpha=self.alpha,
 
                     portfolio_weights=self.portfolio_weights,
-
-                )
-
-                es = compute_es(
-
+                ))
+                es_list.append(compute_es(
                     samples_unscaled, alpha=self.alpha,
 
                     portfolio_weights=self.portfolio_weights,
-
-                )
-
-                var_list.append(var)
-
-                es_list.append(es)
-
-
-
-                # Store 1-D portfolio-return samples for representative days
-
-                # (always stored; trimmed to a handful after breach detection below)
-
-                port_samples = samples_unscaled @ self.portfolio_weights
-
-                _port_sample_store[i] = port_samples
-
-
-
-        # -- Step 3: assemble results DataFrame -------------------------------
+                ))
+                _port_sample_store[i] = samples_unscaled @ self.portfolio_weights
 
         actual_unscaled = self.ret_scaler.inverse_transform(all_returns_arr)
 
@@ -355,13 +240,9 @@ class Backtester:
 
 
         n_dates = min(len(self.test_dates), len(var_list))
-
-        dates    = self.test_dates[:n_dates]
-
-        var_arr  = np.array(var_list[:n_dates])
-
-        es_arr   = np.array(es_list[:n_dates])
-
+        dates = self.test_dates[:n_dates]
+        var_arr = np.array(var_list[:n_dates])
+        es_arr = np.array(es_list[:n_dates])
         port_arr = port_returns[:n_dates]
 
         actual_arr = actual_unscaled[:n_dates]
@@ -373,17 +254,11 @@ class Backtester:
         results = pd.DataFrame({
 
             "actual_port_return": port_arr,
-
-            "var_99":  var_arr,
-
-            "es_99":   es_arr,
-
-            "breach":  breaches,
-
+            "var_99": var_arr,
+            "es_99": es_arr,
+            "breach": breaches,
             "var_99_pct": var_arr * 100,
-
-            "es_99_pct":  es_arr  * 100,
-
+            "es_99_pct": es_arr * 100,
         }, index=dates)
 
 
@@ -391,19 +266,10 @@ class Backtester:
         for j, ticker in enumerate(self.tickers):
 
             results[f"{ticker}_actual"] = actual_arr[:, j]
-
-
-
         self.results = results
 
-
-
-        # -- Step 4: keep stored samples only for representative days ----------
-
         breach_idx = np.where(breaches)[0]
-
-        calm_idx   = np.where(~breaches.astype(bool))[0]
-
+        calm_idx = np.where(~breaches.astype(bool))[0]
         keep_idx = set()
 
         if len(breach_idx) > 0:
@@ -420,28 +286,24 @@ class Backtester:
 
         }
 
-
-
-        # -- Step 5: Kupiec's test ---------------------------------------------
-
         n_breaches = int(breaches.sum())
-
-        n_total    = len(breaches)
-
+        n_total = len(breaches)
         kupiec_result = kupiec_pof_test(n_breaches, n_total, self.alpha)
 
 
 
         logger.info("=== Backtest Results ===")
-
-        logger.info("Period: %s to %s (%d days)", dates[0].date(), dates[-1].date(), n_total)
-
-        logger.info("VaR breaches: %d / %d (%.2f%% observed vs %.2f%% expected)",
-
-                    n_breaches, n_total, n_breaches / n_total * 100, self.alpha * 100)
-
-        logger.info("Kupiec LR: %.4f, p-value: %.4f", kupiec_result.lr_statistic, kupiec_result.p_value)
-
+        logger.info(
+            "Period: %s to %s (%d days)", dates[0].date(), dates[-1].date(), n_total,
+        )
+        logger.info(
+            "VaR breaches: %d / %d (%.2f%% observed vs %.2f%% expected)",
+            n_breaches, n_total, n_breaches / n_total * 100, self.alpha * 100,
+        )
+        logger.info(
+            "Kupiec LR: %.4f, p-value: %.4f",
+            kupiec_result.lr_statistic, kupiec_result.p_value,
+        )
         logger.info(kupiec_result.interpretation)
 
 
@@ -507,14 +369,7 @@ class Backtester:
         df = self.results
 
         fig, axes = plt.subplots(2, 1, figsize=figsize, gridspec_kw={"height_ratios": [3, 1]})
-
-
-
-        ax1 = axes[0]
-
-
-
-        # Actual portfolio returns
+        ax1, ax2 = axes
 
         ax1.plot(
 
@@ -523,11 +378,6 @@ class Backtester:
             color="#3a86ff", linewidth=0.8, alpha=0.9, label="Actual Portfolio Return",
 
         )
-
-
-
-        # VaR band (99% lower bound)
-
         ax1.fill_between(
 
             df.index, df["var_99_pct"], df["var_99_pct"] - 1.0,
@@ -543,11 +393,6 @@ class Backtester:
             color="#ff006e", linewidth=1.2, linestyle="--",
 
         )
-
-
-
-        # ES line
-
         ax1.plot(
 
             df.index, df["es_99_pct"],
@@ -560,8 +405,6 @@ class Backtester:
 
 
 
-        # Mark breach events
-
         breach_dates = df.index[df["breach"] == 1]
 
         breach_returns = df.loc[df["breach"] == 1, "actual_port_return"] * 100
@@ -569,15 +412,9 @@ class Backtester:
         ax1.scatter(
 
             breach_dates, breach_returns,
-
-            color="#ff006e", s=30, zorder=5, label=f"VaR Breaches ({len(breach_dates)})",
-
-            marker="v",
-
+            color="#ff006e", s=30, zorder=5,
+            label=f"VaR Breaches ({len(breach_dates)})", marker="v",
         )
-
-
-
         ax1.axhline(0, color="white", linewidth=0.5, alpha=0.5)
 
         ax1.set_ylabel("Daily Portfolio Return (%)", fontsize=11)
@@ -589,10 +426,6 @@ class Backtester:
         ax1.grid(True, alpha=0.3)
 
 
-
-        # Bottom panel: VaR breach indicators
-
-        ax2 = axes[1]
 
         ax2.bar(
 
@@ -616,8 +449,6 @@ class Backtester:
 
 
 
-        # Format x-axis dates
-
         for ax in axes:
 
             ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
@@ -626,26 +457,11 @@ class Backtester:
 
             plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha="right")
 
-
-
-        # Add Kupiec test annotation
-
         kupiec = self.kupiec_result
-
-        annotation = (
-
-            f"Kupiec's POF: LR={kupiec.lr_statistic:.3f}, "
-
-            f"p={kupiec.p_value:.3f} "
-
-            f"({'PASS PASS' if not kupiec.reject_h0 else 'FAIL FAIL'})"
-
-        )
-
         ax1.annotate(
-
-            annotation,
-
+            (f"Kupiec's POF: LR={kupiec.lr_statistic:.3f}, "
+             f"p={kupiec.p_value:.3f} "
+             f"({'PASS' if not kupiec.reject_h0 else 'FAIL'})"),
             xy=(0.02, 0.04),
 
             xycoords="axes fraction",
@@ -665,9 +481,10 @@ class Backtester:
 
 
         if output_path:
-
-            os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
-
+            os.makedirs(
+                os.path.dirname(output_path) if os.path.dirname(output_path) else ".",
+                exist_ok=True,
+            )
             fig.savefig(output_path, dpi=150, bbox_inches="tight")
 
             logger.info("VaR plot saved to %s", output_path)
@@ -689,29 +506,18 @@ class Backtester:
     ) -> plt.Figure:
 
         """
+        Plot the predicted portfolio return distribution for selected test days.
 
-        Plot the predicted portfolio return distribution (histogram) for selected
-
-        test days alongside the VaR and actual return, showing how the model
-
-        adapts to different macro regimes.
-
-
-
-        Uses MC samples stored during run() for representative days (breach days
-
-        and calm days).
-
-
+        Shows how the model adapts to different macro regimes by displaying
+        the MC histogram alongside VaR and actual return for breach days
+        and calm days stored during run().
 
         Parameters
 
         ----------
 
         n_days : int
-
-            Maximum number of days to plot (limited by stored samples).
-
+            Maximum number of days to plot.
         output_path : str, optional
 
             File path to save the figure.
@@ -758,8 +564,6 @@ class Backtester:
 
 
 
-            # Histogram of MC portfolio return samples
-
             ax.hist(
 
                 port_samples * 100, bins=80, density=True,
@@ -771,27 +575,19 @@ class Backtester:
             ax.axvline(
 
                 row["var_99"] * 100, color="#ff006e", linestyle="--",
-
-                linewidth=1.8, label=f"VaR: {row['var_99']*100:.2f}%",
-
+                linewidth=1.8, label=f"VaR: {row['var_99'] * 100:.2f}%",
             )
 
             ax.axvline(
 
                 row["actual_port_return"] * 100, color="#fb8500", linestyle="-",
-
-                linewidth=2, label=f"Actual: {row['actual_port_return']*100:.2f}%",
-
+                linewidth=2, label=f"Actual: {row['actual_port_return'] * 100:.2f}%",
             )
 
             is_breach = bool(row["breach"])
 
             ax.set_title(
-
-                f"{date.date()}"
-
-                + (" <- BREACH" if is_breach else ""),
-
+                f"{date.date()}" + (" ← BREACH" if is_breach else ""),
                 fontsize=10,
 
                 color="#ff006e" if is_breach else "white",
@@ -815,9 +611,10 @@ class Backtester:
 
 
         if output_path:
-
-            os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
-
+            os.makedirs(
+                os.path.dirname(output_path) if os.path.dirname(output_path) else ".",
+                exist_ok=True,
+            )
             fig.savefig(output_path, dpi=150, bbox_inches="tight")
 
 
@@ -837,9 +634,8 @@ class Backtester:
         Returns
 
         -------
-
-        pd.DataFrame with columns: Metric, Value.
-
+        pd.DataFrame
+            Two columns: Metric and Value.
         """
 
         if self.results is None:
@@ -851,17 +647,12 @@ class Backtester:
         df = self.results
 
         kupiec = self.kupiec_result
-
-
-
         rows = [
 
             ("Backtest Period", f"{df.index[0].date()} to {df.index[-1].date()}"),
 
             ("Total Days", len(df)),
-
-            ("VaR Confidence Level", f"{(1-self.alpha)*100:.0f}%"),
-
+            ("VaR Confidence Level", f"{(1 - self.alpha) * 100:.0f}%"),
             ("Expected Breaches", f"{kupiec.expected_breaches:.1f}"),
 
             ("Observed Breaches", kupiec.n_breaches),
@@ -871,20 +662,10 @@ class Backtester:
             ("Kupiec LR Statistic", f"{kupiec.lr_statistic:.4f}"),
 
             ("Kupiec p-value", f"{kupiec.p_value:.4f}"),
-
-            ("Kupiec Result", "PASS PASS" if not kupiec.reject_h0 else "FAIL FAIL"),
-
-            ("Mean Daily VaR", f"{df['var_99'].mean()*100:.3f}%"),
-
-            ("Mean Daily ES", f"{df['es_99'].mean()*100:.3f}%"),
-
-            ("Mean Actual Daily Return", f"{df['actual_port_return'].mean()*100:.3f}%"),
-
-            ("Worst Day (actual)", f"{df['actual_port_return'].min()*100:.3f}%"),
-
+            ("Kupiec Result", "PASS" if not kupiec.reject_h0 else "FAIL"),
+            ("Mean Daily VaR", f"{df['var_99'].mean() * 100:.3f}%"),
+            ("Mean Daily ES", f"{df['es_99'].mean() * 100:.3f}%"),
+            ("Mean Actual Daily Return", f"{df['actual_port_return'].mean() * 100:.3f}%"),
+            ("Worst Day (actual)", f"{df['actual_port_return'].min() * 100:.3f}%"),
         ]
-
-
-
         return pd.DataFrame(rows, columns=["Metric", "Value"])
-

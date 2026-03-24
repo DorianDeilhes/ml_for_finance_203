@@ -1,19 +1,12 @@
 """
 trainer.py
 ----------
-End-to-end training loop for the Macro-Conditional Normalizing Flow.
+Training loop for the macro-conditional normalizing flow.
 
-Optimizes the Negative Log-Likelihood (NLL) of the training data:
+Optimizes the negative log-likelihood:
     L(θ) = -E[log p(X_t | h_t)]
 
 where h_t is produced by the TFT encoder and log p is computed by the MAF.
-
-Features:
-    - AdamW optimizer with cosine learning rate schedule + warmup
-    - Gradient clipping to prevent exploding gradients during flow training
-    - Train/validation NLL tracking with best-model checkpointing
-    - Early stopping
-    - Device-agnostic (CPU or CUDA)
 """
 
 import logging
@@ -36,12 +29,8 @@ class Trainer:
     """
     Training manager for the ConditionalNormalizingFlow model.
 
-    Handles the full training loop including:
-    - Optimization with AdamW + cosine LR schedule
-    - Gradient clipping (max_norm=1.0)
-    - Per-epoch train and validation NLL logging
-    - Best model checkpointing (lowest validation NLL)
-    - Early stopping to prevent overfitting
+    Handles optimization with AdamW and a cosine LR schedule with linear
+    warmup, gradient clipping, best-model checkpointing, and early stopping.
 
     Parameters
     ----------
@@ -58,13 +47,13 @@ class Trainer:
     n_epochs : int
         Maximum number of training epochs.
     patience : int
-        Early stopping patience (epochs without improvement before stopping).
+        Early stopping patience in epochs without improvement.
     grad_clip : float
         Maximum gradient norm for clipping.
     checkpoint_path : str
         File path to save the best model checkpoint.
-    device : torch.device
-        Device to train on.
+    device : torch.device, optional
+        Device to train on. Defaults to CUDA if available, else CPU.
     warmup_epochs : int
         Number of epochs for linear learning rate warmup.
     """
@@ -94,7 +83,6 @@ class Trainer:
         self.checkpoint_path = checkpoint_path
         self.warmup_epochs = warmup_epochs
 
-        # Device setup
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.device = device
@@ -104,10 +92,9 @@ class Trainer:
         params = self.model.count_parameters()
         logger.info(
             "Model parameters: TFT=%d, Flow=%d, Total=%d",
-            params["tft"], params["flow"], params["total"]
+            params["tft"], params["flow"], params["total"],
         )
 
-        # Optimizer
         self.optimizer = AdamW(
             self.model.parameters(),
             lr=lr,
@@ -115,21 +102,17 @@ class Trainer:
             betas=(0.9, 0.999),
             eps=1e-6,
         )
-
-        # Cosine annealing LR schedule (after warmup)
         self.scheduler = CosineAnnealingLR(
             self.optimizer,
             T_max=max(n_epochs - warmup_epochs, 1),
             eta_min=lr * 1e-2,
         )
 
-        # Training history
         self.train_nll_history: List[float] = []
-        self.val_nll_history:   List[float] = []
+        self.val_nll_history: List[float] = []
         self.best_val_nll: float = float("inf")
         self.best_epoch: int = 0
 
-        # Create checkpoint directory
         os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
 
     def _set_warmup_lr(self, epoch: int) -> None:
@@ -141,7 +124,7 @@ class Trainer:
 
     def _run_epoch(self, loader: DataLoader, train: bool) -> float:
         """
-        Run one epoch (train or eval) and return mean NLL.
+        Run one epoch and return mean NLL.
 
         Parameters
         ----------
@@ -157,18 +140,17 @@ class Trainer:
         """
         self.model.train(train)
         total_nll = 0.0
-        n_batches  = 0
+        n_batches = 0
 
         context = torch.enable_grad() if train else torch.no_grad()
         with context:
             for macro_seq, returns in loader:
                 macro_seq = macro_seq.to(self.device)
-                returns   = returns.to(self.device)
+                returns = returns.to(self.device)
 
                 if train:
                     self.optimizer.zero_grad(set_to_none=True)
 
-                # Forward pass: compute NLL
                 nll, _ = self.model(returns, macro_seq)
 
                 if not torch.isfinite(nll):
@@ -179,10 +161,9 @@ class Trainer:
 
                 if train:
                     nll.backward()
-                    # Gradient clipping prevents exploding gradients in normalizing flows
                     grad_norm = nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
                     if not torch.isfinite(grad_norm):
-                        logger.warning("Non-finite gradient norm encountered; skipping optimizer step.")
+                        logger.warning("Non-finite gradient norm; skipping optimizer step.")
                         self.optimizer.zero_grad(set_to_none=True)
                         continue
                     self.optimizer.step()
@@ -190,9 +171,7 @@ class Trainer:
                 total_nll += nll.item()
                 n_batches += 1
 
-        if n_batches == 0:
-            return float("inf")
-        return total_nll / n_batches
+        return total_nll / n_batches if n_batches > 0 else float("inf")
 
     def fit(self) -> Dict[str, List[float]]:
         """
@@ -200,22 +179,18 @@ class Trainer:
 
         Returns
         -------
-        dict with keys 'train_nll' and 'val_nll': lists of per-epoch NLL values.
+        dict
+            Keys 'train_nll' and 'val_nll': per-epoch NLL histories.
         """
         logger.info("Starting training for up to %d epochs...", self.n_epochs)
         no_improve_count = 0
 
         for epoch in range(self.n_epochs):
-            # ── Learning Rate Warmup ─────────────────────────────────────────
             self._set_warmup_lr(epoch)
 
-            # ── Train ─────────────────────────────────────────────────────────
             train_nll = self._run_epoch(self.train_loader, train=True)
-
-            # ── Validate ──────────────────────────────────────────────────────
             val_nll = self._run_epoch(self.val_loader, train=False)
 
-            # ── LR Schedule (after warmup) ────────────────────────────────────
             if epoch >= self.warmup_epochs:
                 self.scheduler.step()
 
@@ -229,11 +204,10 @@ class Trainer:
                 epoch + 1, self.n_epochs, train_nll, val_nll, current_lr,
             )
 
-            # ── Checkpointing ─────────────────────────────────────────────────
             if val_nll < self.best_val_nll:
                 self.best_val_nll = val_nll
-                self.best_epoch   = epoch + 1
-                no_improve_count  = 0
+                self.best_epoch = epoch + 1
+                no_improve_count = 0
                 torch.save({
                     "epoch": epoch + 1,
                     "model_state_dict": self.model.state_dict(),
@@ -245,7 +219,6 @@ class Trainer:
             else:
                 no_improve_count += 1
 
-            # ── Early Stopping ────────────────────────────────────────────────
             if no_improve_count >= self.patience:
                 logger.info(
                     "Early stopping at epoch %d (no improvement for %d epochs). "
@@ -259,10 +232,7 @@ class Trainer:
             self.best_epoch, self.best_val_nll,
         )
 
-        return {
-            "train_nll": self.train_nll_history,
-            "val_nll":   self.val_nll_history,
-        }
+        return {"train_nll": self.train_nll_history, "val_nll": self.val_nll_history}
 
     def load_best_model(self) -> None:
         """Load the best saved model checkpoint."""

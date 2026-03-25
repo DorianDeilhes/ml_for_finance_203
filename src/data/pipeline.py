@@ -18,8 +18,15 @@ import torch
 from sklearn.preprocessing import RobustScaler, StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
-from macro_data import download_macro_data
-from market_data import compute_rolling_realized_vol, download_market_data
+try:
+    # This works when running from the root (Notebook or 'python -m')
+    from src.data.macro_data import download_macro_data
+    from src.data.market_data import compute_rolling_realized_vol, download_market_data
+
+except ImportError:
+    # This works when running 'python pipeline.py' directly from the data folder
+    from macro_data import download_macro_data
+    from market_data import compute_rolling_realized_vol, download_market_data
 
 logger = logging.getLogger(__name__)
 

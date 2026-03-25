@@ -115,6 +115,27 @@ class Trainer:
 
         os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
 
+    def reset_for_new_fold(self, new_train_loader: DataLoader, new_val_loader: DataLoader, reset_lr: bool = True) -> None:
+        """
+        Update dataloaders and optionally reset the learning rate scheduler and early stopping 
+        for warm-starting a new walk-forward fold.
+        """
+        self.train_loader = new_train_loader
+        self.val_loader = new_val_loader
+        self.train_nll_history = []
+        self.val_nll_history = []
+        self.best_val_nll = float("inf")
+        self.best_epoch = 0
+
+        if reset_lr:
+            self.scheduler = CosineAnnealingLR(
+                self.optimizer,
+                T_max=max(self.n_epochs - self.warmup_epochs, 1),
+                eta_min=self.lr * 1e-2,
+            )
+            for pg in self.optimizer.param_groups:
+                pg["lr"] = self.lr
+
     def _set_warmup_lr(self, epoch: int) -> None:
         """Apply linear LR warmup for the first warmup_epochs epochs."""
         if epoch < self.warmup_epochs:

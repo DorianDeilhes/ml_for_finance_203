@@ -150,6 +150,72 @@ class Backtester:
 
 
 
+    def run_chunk(self) -> pd.DataFrame:
+        """
+        Execute the backtest on the current test_loader and return the results DataFrame.
+        Does not compute full out-of-sample Kupiec test or store plot samples.
+        """
+        self.model.eval()
+        self.model.to(self.device)
+        
+        all_h_t: List[torch.Tensor] = []
+        all_returns: List[np.ndarray] = []
+
+        with torch.no_grad():
+            for macro_seq, returns in self.test_loader:
+                h_t, _ = self.model.tft(macro_seq.to(self.device))
+                all_h_t.append(h_t.cpu())
+                all_returns.append(returns.numpy())
+
+        all_h_t_tensor = torch.cat(all_h_t, dim=0)
+        all_returns_arr = np.concatenate(all_returns, axis=0)
+
+        var_list: List[float] = []
+        es_list: List[float] = []
+
+        with torch.no_grad():
+            for i in range(len(all_h_t_tensor)):
+                h_t_i = all_h_t_tensor[i:i + 1].to(self.device)
+                samples = self.model.flow.sample(
+                    self.n_mc_samples, context=h_t_i
+                ).cpu().numpy()
+                samples_unscaled = self.ret_scaler.inverse_transform(samples)
+
+                var_list.append(compute_var(
+                    samples_unscaled, alpha=self.alpha,
+                    portfolio_weights=self.portfolio_weights,
+                ))
+                es_list.append(compute_es(
+                    samples_unscaled, alpha=self.alpha,
+                    portfolio_weights=self.portfolio_weights,
+                ))
+
+        actual_unscaled = self.ret_scaler.inverse_transform(all_returns_arr)
+        port_returns = actual_unscaled @ self.portfolio_weights
+
+        n_dates = min(len(self.test_dates), len(var_list))
+        dates = self.test_dates[:n_dates]
+        var_arr = np.array(var_list[:n_dates])
+        es_arr = np.array(es_list[:n_dates])
+        port_arr = port_returns[:n_dates]
+        actual_arr = actual_unscaled[:n_dates]
+
+        breaches = (port_arr < var_arr).astype(int)
+
+        results = pd.DataFrame({
+            "actual_port_return": port_arr,
+            "var_99": var_arr,
+            "es_99": es_arr,
+            "breach": breaches,
+            "var_99_pct": var_arr * 100,
+            "es_99_pct": es_arr * 100,
+        }, index=dates)
+
+        for j, ticker in enumerate(self.tickers):
+            results[f"{ticker}_actual"] = actual_arr[:, j]
+
+        return results
+
     def run(self) -> pd.DataFrame:
 
         """

@@ -360,6 +360,10 @@ class MAFlow(nn.Module):
 
         self.register_buffer("flip_idx", torch.arange(dim - 1, -1, -1))
 
+        # Learnable degrees of freedom for the Student-T base distribution.
+        # Initialized around df=10.0 (log(8) ~ 2.079). df = exp(log_df) + 2 ensures df > 2.
+        self.log_df = nn.Parameter(torch.log(torch.tensor(8.0)))
+
     def log_prob(
         self,
         x: torch.Tensor,
@@ -396,11 +400,9 @@ class MAFlow(nn.Module):
                 z, log_det = layer(z, context)
                 log_det_total = log_det_total + log_det
 
-        D = x.shape[-1]
-        log_pz = (
-            -0.5 * D * torch.log(torch.tensor(2.0 * torch.pi, device=x.device))
-            - 0.5 * (z ** 2).sum(dim=-1)
-        )
+        df = torch.exp(self.log_df) + 2.0
+        dist = torch.distributions.StudentT(df)
+        log_pz = dist.log_prob(z).sum(dim=-1)
         return log_pz + log_det_total
 
     @torch.no_grad()
@@ -429,7 +431,9 @@ class MAFlow(nn.Module):
         if device is None:
             device = next(self.parameters()).device
 
-        z = torch.randn(n_samples, self.dim, device=device)
+        df = torch.exp(self.log_df) + 2.0
+        dist = torch.distributions.StudentT(df)
+        z = dist.rsample((n_samples, self.dim))
 
         if context is not None and context.shape[0] == 1:
             context = context.expand(n_samples, -1)

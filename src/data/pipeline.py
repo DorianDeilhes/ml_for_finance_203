@@ -15,7 +15,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import RobustScaler, StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.data.macro_data import download_macro_data
@@ -291,7 +291,7 @@ def build_pipeline(
         master_test.index[0].date(), master_test.index[-1].date(), len(master_test),
     )
 
-    macro_scaler = StandardScaler()
+    macro_scaler = RobustScaler()
     ret_scaler = StandardScaler()
     macro_scaler.fit(master_train[feature_cols].values)
     ret_scaler.fit(master_train[ret_cols].values)
@@ -403,7 +403,7 @@ def build_walk_forward_pipeline(
             logger.info("Not enough test data remaining. Stopping generator.")
             break
 
-        macro_scaler = StandardScaler()
+        macro_scaler = RobustScaler()
         ret_scaler = StandardScaler()
         macro_scaler.fit(master_train[feature_cols].values)
         ret_scaler.fit(master_train[ret_cols].values)

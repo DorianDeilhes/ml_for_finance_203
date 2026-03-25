@@ -349,7 +349,8 @@ def build_pipeline(
 
 
 def build_walk_forward_pipeline(
-    fred_api_key: str,
+    fred_api_key: Optional[str] = None,
+    master: Optional[pd.DataFrame] = None,
     seq_len: int = SEQ_LEN,
     batch_size: int = BATCH_SIZE,
     start_year: int = 2005,
@@ -370,7 +371,10 @@ def build_walk_forward_pipeline(
     info : dict
         Fold metadata including dates and number of features/assets.
     """
-    master = build_master_dataset(fred_api_key=fred_api_key)
+    if master is None:
+        if fred_api_key is None:
+            raise ValueError("Must provide either 'master' DataFrame or 'fred_api_key'")
+        master = build_master_dataset(fred_api_key=fred_api_key)
 
     ret_cols = [f"{t}_ret" for t in TICKERS]
     feature_cols = [c for c in master.columns if c not in ret_cols]

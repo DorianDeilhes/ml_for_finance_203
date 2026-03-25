@@ -18,8 +18,8 @@ import torch
 from sklearn.preprocessing import RobustScaler, StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
-from src.data.macro_data import download_macro_data
-from src.data.market_data import compute_rolling_realized_vol, download_market_data
+from macro_data import download_macro_data
+from market_data import compute_rolling_realized_vol, download_market_data
 
 logger = logging.getLogger(__name__)
 
@@ -457,6 +457,11 @@ def build_walk_forward_pipeline(
 
 if __name__ == "__main__":
     import os
+    from dotenv import load_dotenv
+
+    # Load environment variables from .env file
+    load_dotenv()
+    
     logging.basicConfig(level=logging.INFO)
     api_key = os.environ.get("FRED_API_KEY", "YOUR_FRED_API_KEY")
     train_loader, val_loader, test_loader, *_ = build_pipeline(fred_api_key=api_key)

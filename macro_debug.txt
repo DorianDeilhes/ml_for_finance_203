@@ -1,0 +1,23 @@
+INFO:__main__:Downloading FRED series CPIAUCSL (CPI) with vintage dates...
+INFO:__main__:  251 observations for CPIAUCSL. Publication range: 2003-02-21 to 2023-12-12
+INFO:__main__:Downloading FRED series PAYEMS (NFP) with vintage dates...
+INFO:__main__:  251 observations for PAYEMS. Publication range: 2003-02-07 to 2023-12-08
+INFO:__main__:Downloading FRED series DFF (FedFundsRate) with vintage dates...
+Traceback (most recent call last):
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\src\data\macro_data.py", line 289, in <module>
+    macro = download_macro_data(fred_api_key=api_key)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\src\data\macro_data.py", line 265, in download_macro_data
+    _download_fred_series_with_vintages(fred, "DFF", "FedFundsRate", start, end)
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\src\data\macro_data.py", line 73, in _download_fred_series_with_vintages
+    chunk_df = fred.get_series_all_releases(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\site-packages\fredapi\fred.py", line 255, in get_series_all_releases
+    root = self.__fetch_data(url)
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\site-packages\fredapi\fred.py", line 85, in __fetch_data
+    root = ET.fromstring(response.read())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\xml\etree\ElementTree.py", line 1335, in XML
+    parser.feed(text)
+KeyboardInterrupt

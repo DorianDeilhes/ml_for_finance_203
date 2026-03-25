@@ -1,0 +1,30 @@
+INFO:__main__:Downloading FRED series CPIAUCSL (CPI) with vintage dates...
+INFO:__main__:  251 observations for CPIAUCSL. Publication range: 2003-02-21 to 2023-12-12
+INFO:__main__:Downloading FRED series PAYEMS (NFP) with vintage dates...
+INFO:__main__:  251 observations for PAYEMS. Publication range: 2003-02-07 to 2023-12-08
+INFO:__main__:Downloading FRED series DFF (FedFundsRate) with vintage dates...
+Traceback (most recent call last):
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\src\data\macro_data.py", line 296, in <module>
+    macro = download_macro_data(fred_api_key=api_key)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\src\data\macro_data.py", line 272, in download_macro_data
+    _download_fred_series_with_vintages(fred, "DFF", "FedFundsRate", start, end)
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\src\data\macro_data.py", line 74, in _download_fred_series_with_vintages
+    chunk_df = fred.get_series_all_releases(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\site-packages\fredapi\fred.py", line 268, in get_series_all_releases
+    date = self._parse(child.get('date'))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\site-packages\fredapi\fred.py", line 95, in _parse
+    rv = pd.to_datetime(date_str, format=format)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\site-packages\pandas\core\tools\datetimes.py", line 1074, in to_datetime
+    result = convert_listlike(np.array([arg]), format)[0]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\site-packages\pandas\core\tools\datetimes.py", line 435, in _convert_listlike_datetimes
+    return _array_strptime_with_fallback(arg, name, utc, format, exact, errors)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\site-packages\pandas\core\tools\datetimes.py", line 470, in _array_strptime_with_fallback
+    result, tz_out = array_strptime(arg, fmt, exact=exact, errors=errors, utc=utc)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

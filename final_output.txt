@@ -1,0 +1,40 @@
+INFO:__main__:Downloading FRED series CPIAUCSL (CPI) with vintage dates...
+INFO:__main__:  252 observations for CPIAUCSL. Publication range: 2003-02-21 to 2024-01-11
+INFO:__main__:Downloading FRED series PAYEMS (NFP) with vintage dates...
+INFO:__main__:  252 observations for PAYEMS. Publication range: 2003-02-07 to 2024-01-05
+INFO:__main__:Downloading FRED series DFF (FedFundsRate) with vintage dates...
+WARNING:__main__:Could not download vintage data for DFF: Bad Request.  There are 5004 vintage dates in the specified real-time period: 1776-07-04 to 9999-12-31.  This exceeds the maximum number of vintage dates allowed for this file type (2000).. Falling back to basic download.
+INFO:__main__:Downloading FRED series BAMLH0A0HYM2 (HYSpread) with vintage dates...
+WARNING:__main__:Could not download vintage data for BAMLH0A0HYM2: Bad Request.  There are 3119 vintage dates in the specified real-time period: 1776-07-04 to 9999-12-31.  This exceeds the maximum number of vintage dates allowed for this file type (2000).. Falling back to basic download.
+INFO:__main__:Downloading VIX from Yahoo Finance...
+INFO:__main__:All macro data downloaded. Variables: ['CPI', 'NFP', 'FedFundsRate', 'HYSpread', 'VIX']
+
+CPI: (240, 3)
+   realtime_start observation_date       CPI
+12     2004-02-20       2004-01-01  1.975851
+13     2004-03-17       2004-02-01  1.636661
+14     2004-04-14       2004-03-01  1.794454
+
+NFP: (251, 3)
+  realtime_start observation_date    NFP
+1     2003-03-07       2003-02-01 -257.0
+2     2003-04-04       2003-03-01 -139.0
+3     2003-05-02       2003-04-01  -60.0
+
+FedFundsRate: (252, 3)
+  observation_date  FedFundsRate realtime_start
+0       2003-02-01          0.00     2003-03-01
+1       2003-03-01          0.05     2003-04-01
+2       2003-04-01         -0.07     2003-05-01
+
+HYSpread: (5549, 3)
+  observation_date  HYSpread realtime_start
+0       2003-01-01       NaN     2003-02-15
+1       2003-01-02      8.65     2003-02-16
+2       2003-01-03      8.57     2003-02-17
+
+VIX: (5285, 3)
+  observation_date        VIX realtime_start
+0       2003-01-02  25.389999     2003-01-02
+1       2003-01-03  24.680000     2003-01-03
+2       2003-01-06  24.910000     2003-01-06

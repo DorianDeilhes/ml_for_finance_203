@@ -1,0 +1,82 @@
+INFO:__main__:Downloading FRED series CPIAUCSL (CPI) with vintage dates...
+WARNING:__main__:Could not download vintage data for CPIAUCSL: Internal Server Error. Falling back to basic download.
+INFO:__main__:Downloading FRED series PAYEMS (NFP) with vintage dates...
+WARNING:__main__:Could not download vintage data for PAYEMS: Internal Server Error. Falling back to basic download.
+Traceback (most recent call last):
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\site-packages\fredapi\fred.py", line 84, in __fetch_data
+    response = urlopen(url)
+               ^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\urllib\request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\urllib\request.py", line 521, in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\urllib\request.py", line 630, in http_response
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\urllib\request.py", line 559, in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\urllib\request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\urllib\request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 500: Internal Server Error
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\src\data\macro_data.py", line 73, in _download_fred_series_with_vintages
+    chunk_df = fred.get_series_all_releases(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\site-packages\fredapi\fred.py", line 255, in get_series_all_releases
+    root = self.__fetch_data(url)
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\site-packages\fredapi\fred.py", line 88, in __fetch_data
+    raise ValueError(root.get('message'))
+ValueError: Internal Server Error
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\site-packages\fredapi\fred.py", line 84, in __fetch_data
+    response = urlopen(url)
+               ^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\urllib\request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\urllib\request.py", line 521, in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\urllib\request.py", line 630, in http_response
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\urllib\request.py", line 559, in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\urllib\request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\urllib\request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 500: Internal Server Error
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\src\data\macro_data.py", line 289, in <module>
+    macro = download_macro_data(fred_api_key=api_key)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\src\data\macro_data.py", line 260, in download_macro_data
+    _download_fred_series_with_vintages(fred, "PAYEMS", "NFP", start, end)
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\src\data\macro_data.py", line 114, in _download_fred_series_with_vintages
+    series = fred.get_series(series_id, observation_start=start, observation_end=end)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\site-packages\fredapi\fred.py", line 151, in get_series
+    root = self.__fetch_data(url)
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\D\Documents\Dauphine\203\ML in Finance\big_projet_ML\env\Lib\site-packages\fredapi\fred.py", line 88, in __fetch_data
+    raise ValueError(root.get('message'))
+ValueError: Internal Server Error

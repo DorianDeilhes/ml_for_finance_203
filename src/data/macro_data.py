@@ -56,8 +56,40 @@ def _download_fred_series_with_vintages(
     logger.info("Downloading FRED series %s (%s) with vintage dates...", series_id, label)
 
     try:
-        releases = fred.get_series_all_releases(series_id)
-        releases = releases.rename(columns={"date": "observation_date", "value": label})
+        # FRED has a limit of 2000 vintage dates per request. Daily series over many years will hit this limit.
+        # We chunk the requests into 5-year blocks to avoid the "Bad Request: ... exceeds maximum number of vintage dates" error.
+        start_dt = pd.to_datetime(start)
+        end_dt = pd.to_datetime(end)
+        
+        date_ranges = []
+        current_start = start_dt
+        while current_start < end_dt:
+            current_end = min(current_start + pd.DateOffset(years=5) - pd.Timedelta(days=1), end_dt)
+            date_ranges.append((current_start, current_end))
+            current_start = current_end + pd.Timedelta(days=1)
+            
+        dfs = []
+        for c_start, c_end in date_ranges:
+            try:
+                chunk_df = fred.get_series_all_releases(
+                    series_id, 
+                    realtime_start=c_start.strftime("%Y-%m-%d"), 
+                    realtime_end=c_end.strftime("%Y-%m-%d")
+                )
+                if not chunk_df.empty:
+                    chunk_df = chunk_df.rename(columns={"date": "observation_date", "value": label})
+                    dfs.append(chunk_df)
+            except ValueError as e:
+                # Some series (like BAMLH0A0HYM2) simply don't have vintage data going back to 2003
+                # FRED API responds with a specific ValueError for dates that predate ALFRED
+                if "does not exist in ALFRED" in str(e):
+                    continue
+                raise e
+
+        if not dfs:
+            raise ValueError(f"No vintage data returned for {series_id}")
+
+        releases = pd.concat(dfs, ignore_index=True)
         releases["observation_date"] = pd.to_datetime(releases["observation_date"])
         releases["realtime_start"] = pd.to_datetime(releases["realtime_start"])
 

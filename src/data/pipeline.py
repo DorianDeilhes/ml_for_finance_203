@@ -347,6 +347,110 @@ def build_pipeline(
     return train_loader, val_loader, test_loader, macro_scaler, ret_scaler, info, num_macro_features, num_assets
 
 
+
+def build_walk_forward_pipeline(
+    fred_api_key: str,
+    seq_len: int = SEQ_LEN,
+    batch_size: int = BATCH_SIZE,
+    start_year: int = 2005,
+    initial_train_end_year: int = 2016,
+    end_year: int = 2023,
+    val_years: int = 1,
+    test_years: int = 1,
+) -> Tuple:
+    """
+    Generator for Walk-Forward Expanding Window cross-validation.
+
+    Yields:
+    -------
+    train_loader : DataLoader
+    val_loader : DataLoader
+    test_loader : DataLoader
+    ret_scaler : StandardScaler
+    info : dict
+        Fold metadata including dates and number of features/assets.
+    """
+    master = build_master_dataset(fred_api_key=fred_api_key)
+
+    ret_cols = [f"{t}_ret" for t in TICKERS]
+    feature_cols = [c for c in master.columns if c not in ret_cols]
+    num_macro_features = len(feature_cols)
+    num_assets = len(ret_cols)
+
+    current_train_end_year = initial_train_end_year
+
+    while current_train_end_year + val_years + test_years <= end_year + 1:
+        train_end = f"{current_train_end_year}-12-31"
+        val_start = f"{current_train_end_year + 1}-01-01"
+        val_end = f"{current_train_end_year + val_years}-12-31"
+        test_start = f"{current_train_end_year + val_years + 1}-01-01"
+        test_end = f"{current_train_end_year + val_years + test_years}-12-31"
+
+        logger.info(
+            "Fold: Train -> %s | Val %s -> %s | Test %s -> %s",
+            train_end, val_start, val_end, test_start, test_end
+        )
+
+        train_mask = master.index <= pd.Timestamp(train_end)
+        val_mask = (master.index >= pd.Timestamp(val_start)) & (master.index <= pd.Timestamp(val_end))
+        test_mask = (master.index >= pd.Timestamp(test_start)) & (master.index <= pd.Timestamp(test_end))
+
+        master_train = master[train_mask]
+        master_val = master[val_mask]
+        master_test = master[test_mask]
+
+        if len(master_test) <= seq_len:
+            logger.info("Not enough test data remaining. Stopping generator.")
+            break
+
+        macro_scaler = StandardScaler()
+        ret_scaler = StandardScaler()
+        macro_scaler.fit(master_train[feature_cols].values)
+        ret_scaler.fit(master_train[ret_cols].values)
+
+        def _scale(df: pd.DataFrame) -> pd.DataFrame:
+            scaled = df.copy()
+            scaled[feature_cols] = macro_scaler.transform(df[feature_cols].values)
+            scaled[ret_cols] = ret_scaler.transform(df[ret_cols].values)
+            return scaled
+
+        X_train, y_train, dates_train = build_sequences(_scale(master_train), seq_len)
+        X_val, y_val, dates_val = build_sequences(_scale(master_val), seq_len)
+        X_test, y_test, dates_test = build_sequences(_scale(master_test), seq_len)
+
+        dtype = torch.float32
+        train_loader = DataLoader(
+            TensorDataset(torch.tensor(X_train, dtype=dtype), torch.tensor(y_train, dtype=dtype)),
+            batch_size=batch_size, shuffle=True, drop_last=True,
+        )
+        val_loader = DataLoader(
+            TensorDataset(torch.tensor(X_val, dtype=dtype), torch.tensor(y_val, dtype=dtype)),
+            batch_size=batch_size, shuffle=False, drop_last=False,
+        )
+        test_loader = DataLoader(
+            TensorDataset(torch.tensor(X_test, dtype=dtype), torch.tensor(y_test, dtype=dtype)),
+            batch_size=batch_size, shuffle=False, drop_last=False,
+        )
+
+        info = {
+            "feature_cols": feature_cols,
+            "ret_cols": ret_cols,
+            "tickers": TICKERS,
+            "dates_train": dates_train,
+            "dates_val": dates_val,
+            "dates_test": dates_test,
+            "num_macro_features": num_macro_features,
+            "num_assets": num_assets,
+            "train_end": train_end,
+            "test_start": test_start,
+            "test_end": test_end,
+        }
+
+        yield train_loader, val_loader, test_loader, ret_scaler, info
+
+        current_train_end_year += test_years
+
+
 if __name__ == "__main__":
     import os
     logging.basicConfig(level=logging.INFO)

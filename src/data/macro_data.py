@@ -254,6 +254,11 @@ def download_macro_data(
 
 if __name__ == "__main__":
     import os
+    from dotenv import load_dotenv
+    
+    # Load environment variables from .env file
+    load_dotenv()
+    
     logging.basicConfig(level=logging.INFO)
     api_key = os.environ.get("FRED_API_KEY", "YOUR_FRED_API_KEY")
     macro = download_macro_data(fred_api_key=api_key)

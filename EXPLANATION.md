@@ -7,13 +7,13 @@ These notes are meant to be *more detailed than the README* and to follow **exac
 
 - [I) Problem and ML Formulation](#problem-formulation)
 - [1) Data Pipeline](#data-pipeline)
-- [1.2) Exploratory Data Analysis (EDA)](#eda)
+- [1.3) Exploratory Data Analysis (EDA)](#eda)
 - [2) Model Architecture](#model-architecture)
 - [3) Training](#training)
 - [4) Financial Backtesting](#backtesting)
-- [5) Interpretability](#interpretability)
-- [6) Summary](#summary)
-- [7) Walk-Forward Cross-Validation](#walk-forward-cv)
+- [5) Summary](#summary)
+- [6) Walk-Forward Cross-Validation](#walk-forward-cv)
+- [7) Model Interpretability: Opening the Black Box](#interpretability)
 - [Glossary](#glossary)
 
 ## Source-code map
@@ -489,10 +489,10 @@ Dropping the initial NaNs is therefore expected and is part of producing a clean
 Targets are:
 - `SPY_ret`, `TLT_ret`, `GLD_ret`
 
-<a id="eda"></a>
-# 1.bis) Exploratory Data Analysis (EDA)
+<a id=”eda”></a>
+# 1.3) Exploratory Data Analysis (EDA)
 
-This chapter mirrors notebook section “1.bis Exploratory Data Analysis”.
+This chapter mirrors notebook section “1.3 Exploratory Data Analysis”.
 
 The EDA in the notebook is not decorative: it is there to justify *why* we need a conditional heavy-tailed density model.
 
@@ -545,17 +545,39 @@ This motivates modeling a **joint distribution** $p(X_t \mid M_{<t})$ rather tha
 In this project, these requirements correspond to:
 - TFT encoder for regime context: [src/models/tft.py](src/models/tft.py)
 - MAF flow for joint density: [src/models/maf.py](src/models/maf.py)
-<a id="model-architecture"></a>
-# 2) Model Architecture (TFT encoder + MAF flow)
+<a id=”model-architecture”></a>
+# 2) Model Architecture
 
-This chapter corresponds to notebook section “2. Model Architecture / 2.1 Instantiate the Conditional Normalizing Flow”.
+This chapter mirrors notebook section “2. Model Architecture”.
+
+Three architectures are compared. Benchmarks (Gaussian VaR, GB Quantile) are interpretable baselines; the main model (TFT+MAF) is the full conditional density estimator.
+
+## 2.1 Gaussian VaR
+
+Assumes portfolio returns follow a stationary Normal distribution. Mean and covariance are estimated once on the training set and held fixed. VaR is the corresponding quantile of this distribution. Simple and interpretable, but blind to regime changes and heavy tails.
+
+Implementation: [src/backtest/benchmarks.py](src/backtest/benchmarks.py)
+
+## 2.2 Gradient Boosting Quantile
+
+Directly predicts the 1% quantile of the portfolio return distribution from the current macro features. Regime-aware by construction, but only outputs a single quantile, not the full return distribution.
+
+Implementation: [src/backtest/benchmarks.py](src/backtest/benchmarks.py)
+
+## 2.3 Conditional Normalizing Flow (TFT + MAF)
+
+We frame this as a **conditional density estimation** problem. Given the macroeconomic history of the past 63 trading days $M_{<t}$, we learn:
+
+$$p(X_t \mid M_{<t;\,\theta}) \quad \text{where } X_t = (\text{SPY}_t,\, \text{TLT}_t,\, \text{GLD}_t) \in \mathbb{R}^3$$
+
+A two-stage architecture: a TFT encoder compresses the macro sequence into a context vector $h_t$, which conditions a MAF flow over asset returns.
 
 Primary source files:
 - [src/models/flow_model.py](src/models/flow_model.py)
 - [src/models/tft.py](src/models/tft.py)
 - [src/models/maf.py](src/models/maf.py)
 
-## 2.1 What enters the model? (shapes)
+### What enters the model? (shapes)
 
 From the data pipeline, each training example is:
 
@@ -571,7 +593,7 @@ The model outputs during training:
 - `nll`: scalar loss (mean NLL over batch)
 - `var_weights`: tensor `(B, T, F)` interpretability weights
 
-## 2.2 The big idea of a normalizing flow
+### The big idea of a normalizing flow
 
 A normalizing flow defines a complicated density by transforming a simple base random variable.
 
@@ -587,7 +609,7 @@ $$\log p_X(x \mid h) = \log p_Z(z) + \log\left|\det\left(\frac{\partial z}{\part
 
 Key requirement: we must compute the Jacobian determinant efficiently.
 
-## 2.3 Why autoregressive flows? (MAF)
+### Why autoregressive flows? (MAF)
 
 A Masked Autoregressive Flow (MAF) is designed so that the Jacobian is triangular.
 
@@ -603,7 +625,7 @@ That is **O(D)**, cheap.
 
 This is implemented in [src/models/maf.py](src/models/maf.py) in `MAFLayer.forward()`.
 
-## 2.4 MADE masks (how the triangular structure is enforced)
+### MADE masks (how the triangular structure is enforced)
 
 We need the network producing $(\alpha,\mu)$ to obey:
 
@@ -618,7 +640,7 @@ In code:
 Context injection:
 - context units are degree 0 → visible to all outputs.
 
-## 2.5 Conditioning on macro regime: the TFT encoder
+### Conditioning on macro regime: the TFT encoder
 
 The flow needs a context vector $h_t$ summarizing the last 63 days of macro features.
 
@@ -646,7 +668,7 @@ Core TFT components in this simplified implementation:
 
 All of this is in [src/models/tft.py](src/models/tft.py).
 
-## 2.6 End-to-end wrapper: ConditionalNormalizingFlow
+### End-to-end wrapper: ConditionalNormalizingFlow
 
 `ConditionalNormalizingFlow` in [src/models/flow_model.py](src/models/flow_model.py) simply composes:
 
@@ -657,7 +679,7 @@ Training loss:
 
 $$\mathrm{NLL} = -\frac{1}{B}\sum_{b=1}^{B} \log p(x^{(b)} \mid h^{(b)})$$
 
-## 2.7 Student-t base distribution (heavy tails)
+### Student-t base distribution (heavy tails)
 
 In [src/models/maf.py](src/models/maf.py), `MAFlow` uses a **Student-t** base distribution rather than Normal:
 
@@ -667,7 +689,7 @@ Student-t has heavier tails than Normal. Smaller $\nu$ → heavier tails.
 
 This is a modeling choice aligned with financial returns.
 
-## 2.8 Sanity check in the notebook
+### Sanity check in the notebook
 
 The notebook does a forward pass and prints an “initial NLL”.
 
@@ -679,23 +701,49 @@ The notebook prints the term $\frac{D}{2}\log(2\pi)$ as a rough anchor.
 
 ---
 
-## 2.9 What you should be able to explain
+### What you should be able to explain
 
 1) State the change-of-variables formula.
 2) Explain why triangular Jacobian → logdet is sum of diagonal logs.
 3) Explain why MAF sampling is slower than training (inverse is sequential).
 4) Explain what the TFT variable weights mean.
-<a id="training"></a>
-# 3) Training (Objective, optimizer, stability)
+<a id=”training”></a>
+# 3) Training
 
-This chapter mirrors notebook section “3. Training” including:
-- “3.1 Naive Benchmarks — Fitting”
-- “3.2 TFT + MAF — Training”
+This chapter mirrors notebook section “3. Training”.
+
+All three models are trained and evaluated on the same time windows:
+
+| Split | Period |
+|-------|--------|
+| Train | 2005 – 2016 |
+| Val   | 2017 – 2021 |
+| Test  | 2022 – 2024 |
+
+## 3.1 Gaussian VaR
+
+Mean and covariance estimated once on the raw training returns. No macro features, no regime adaptation.
+
+Implementation: [src/backtest/benchmarks.py](src/backtest/benchmarks.py)
+
+## 3.2 Gradient Boosting Quantile
+
+Trained on the macro sequences from the training DataLoader, predicting the 1% quantile of the equal-weighted portfolio return.
+
+Implementation: [src/backtest/benchmarks.py](src/backtest/benchmarks.py)
+
+## 3.3 TFT + MAF
+
+We minimize the **Negative Log-Likelihood (NLL)**:
+
+$$\mathcal{L}(\theta) = -\mathbb{E}\left[\log p_Z(g_\theta(x; h_t)) + \log\left|\det\frac{\partial g_\theta}{\partial x}\right|\right]$$
+
+The log-determinant term is **O(D)** due to the triangular Jacobian from MADE masks.
 
 Primary source file: [src/training/trainer.py](src/training/trainer.py)
 Supporting model: [src/models/flow_model.py](src/models/flow_model.py)
 
-## 3.1 Benchmarks (why they exist)
+## 3.4 Benchmarks (why they exist)
 
 The notebook compares 3 approaches:
 
@@ -714,7 +762,7 @@ The notebook compares 3 approaches:
 Code references:
 - Gaussian + GB: [src/backtest/benchmarks.py](src/backtest/benchmarks.py)
 
-## 3.2 Training objective (NLL for conditional flow)
+## 3.5 Training objective (NLL for conditional flow)
 
 The model outputs a log-likelihood:
 
@@ -732,7 +780,7 @@ where $g$ is the data→noise mapping and $J_g$ is its Jacobian.
 
 In MAF layers, $\log |\det J|$ is a sum of $-\alpha_i$ terms (triangular Jacobian).
 
-## 3.3 What a training iteration does
+## 3.6 What a training iteration does
 
 One step on a batch $(M_{<t}, X_t)$:
 
@@ -743,7 +791,7 @@ One step on a batch $(M_{<t}, X_t)$:
 
 This is implemented in `Trainer._run_epoch()`.
 
-## 3.4 Optimization choices (why these)
+## 3.7 Optimization choices (why these)
 
 In [src/training/trainer.py](src/training/trainer.py):
 
@@ -764,7 +812,7 @@ In [src/training/trainer.py](src/training/trainer.py):
 - Checkpointing
   - Saves the best validation NLL model to `checkpoints/best_model.pt`.
 
-## 3.5 What is “validation NLL” telling you?
+## 3.8 What is “validation NLL” telling you?
 
 NLL is not accuracy, it is *calibration of the density*.
 
@@ -776,7 +824,7 @@ But beware:
 - lower NLL doesn’t automatically guarantee good VaR calibration.
 - that’s why we still run **Kupiec POF** out-of-sample.
 
-## 3.6 “Why training flows can be unstable” (important intuition)
+## 3.9 “Why training flows can be unstable” (important intuition)
 
 Normalizing flows are powerful because they model densities exactly.
 But that also means:
@@ -788,19 +836,18 @@ Stability tools in this repo:
 - optional batch norm layers between flow steps
 - robust scaling of macro features (RobustScaler)
 
-## 3.7 What you should be able to explain
+## 3.10 What you should be able to explain
 
 1) Why NLL is the correct objective for distribution modeling.
 2) Why early stopping is done on validation NLL.
 3) Why we clip gradients.
 4) Why AdamW + warmup is common for attention-based encoders.
-<a id="backtesting"></a>
+<a id=”backtesting”></a>
 # 4) Financial Backtesting (VaR/ES + Kupiec test)
 
-This chapter mirrors notebook section “4. Financial Backtesting” with subsections:
-- 4.1 Gaussian VaR
-- 4.2 GB Quantile VaR
-- 4.3 TFT + MAF Monte Carlo backtest
+This chapter mirrors notebook section “4. Financial Backtesting”.
+
+All three models are evaluated on the same test set (2022–2024) using the same protocol: predicted daily 1% VaR versus actual equal-weighted portfolio returns, validated via Kupiec's POF test. The estimation methods differ by nature — Gaussian uses a closed-form normal quantile, GB predicts the quantile directly from macro features, TFT+MAF draws 10 000 Monte Carlo samples per day. What is compared is identical across all three: the predicted 1% VaR threshold against realized breaches.
 
 Primary source files:
 - [src/backtest/backtester.py](src/backtest/backtester.py)
@@ -838,6 +885,18 @@ This ignores regimes entirely.
 Notebook alignment detail:
 - notebook uses unscaled returns for this benchmark.
 
+### 4.1.1 VaR Bands Plot
+
+The plot shows the predicted VaR band (constant horizontal line) overlaid on the realized equal-weighted portfolio returns over the test period. Breach markers indicate days where the actual return fell below the VaR threshold.
+
+Because Gaussian VaR is constant, the band does not react to volatility spikes or stress periods. In 2022 this translates to a visibly flat line regardless of market turmoil.
+
+### 4.1.2 Kupiec's POF Test Results
+
+Displays the Kupiec test output: observed breach count, observed breach rate, LR statistic, p-value, and the PASS/FAIL decision. A chi-squared reference distribution is plotted alongside the LR statistic to show where it falls relative to the critical value (3.841 at 5%).
+
+Interpretation: if the Gaussian model fails the Kupiec test, it means the constant Normal distribution is mis-calibrated — too optimistic or too conservative — and confirms that regime-awareness matters.
+
 ## 4.2 Benchmark 2: Gradient Boosting quantile VaR
 
 File: [src/backtest/benchmarks.py](src/backtest/benchmarks.py)
@@ -852,6 +911,14 @@ The notebook uses as input features:
 - the *last time step* in the macro window (not the whole sequence).
 
 That is a strong simplifying assumption.
+
+### 4.2.1 VaR Bands Plot
+
+Same format as 4.1.1 but the VaR band now varies day-by-day: the GB model adjusts its 1% quantile prediction based on current macro features. The band should react to known stress indicators (rising VIX, widening HY spreads) to some degree, unlike the flat Gaussian line.
+
+### 4.2.2 Kupiec’s POF Test Results
+
+Same format as 4.1.2. The Kupiec output for GB reveals whether regime-awareness at the quantile level translates into better statistical calibration. It is possible for a regime-aware model to still fail Kupiec if the quantile predictions are noisy or if the GB model overfits to in-sample patterns.
 
 ## 4.3 Main model backtest: TFT + MAF via Monte Carlo
 
@@ -962,82 +1029,12 @@ Plots:
 1) Why VaR needs a distribution, not a point forecast.
 2) Why Monte Carlo approximates quantiles.
 3) Why Kupiec is a calibration test (frequency), not a “profit” metric.
-<a id="interpretability"></a>
-# 5) Interpretability: TFT Variable Importance
+<a id=”summary”></a>
+# 5) Summary (What to remember)
 
-This chapter mirrors notebook section “5. Model Interpretability: Variable Importance (TFT)”.
+This chapter mirrors notebook section “5. Summary”.
 
-Primary implementation:
-- variable selection weights produced by the TFT: [src/models/tft.py](src/models/tft.py)
-- helper method: `ConditionalNormalizingFlow.get_variable_importance`: [src/models/flow_model.py](src/models/flow_model.py)
-
-## 5.1 What are we interpreting?
-
-The model is:
-
-$$M_{<t} \to h_t \to p(X_t\mid h_t)$$
-
-The flow part (MAF) is powerful but not naturally interpretable.
-
-The TFT part includes a Variable Selection Network (VSN) that outputs **weights** per feature per time step.
-
-These weights are a form of learned “attention over variables”.
-
-## 5.2 Where do weights come from?
-
-In [src/models/tft.py](src/models/tft.py):
-
-- each feature is embedded into a vector
-- the VSN computes:
-  - a transformed representation per variable
-  - a selection score per variable
-- softmax turns scores into weights that sum to 1 across variables.
-
-So for each sample (batch element) and each time step:
-
-$$w_{t,i} \ge 0, \quad \sum_{i=1}^{F} w_{t,i} = 1$$
-
-Interpretation:
-- if $w_{t,i}$ is large, feature $i$ is important at time $t$ for building the regime representation.
-
-## 5.3 How the notebook computes importance
-
-The notebook loops over `test_loader` and calls:
-
-- `model.get_variable_importance(macro_seq)`
-
-which returns an average over:
-- batch dimension
-- time dimension
-
-So output is:
-- a vector of length $F$ (one scalar per feature)
-
-This is plotted as a horizontal bar chart.
-
-## 5.4 Cautions (interpretability is not causality)
-
-Important: these weights are **not causal effects**.
-
-They tell you:
-- which features the model used to compress information into $h_t$
-
-They do not prove:
-- “CPI causes returns”
-
-To reason about causality you would need an entirely different setup.
-
-## 5.5 What you should be able to explain
-
-1) Why weights sum to 1 (softmax).
-2) Why “importance” is model-dependent.
-3) Why interpretability here is about representation, not causality.
-<a id="summary"></a>
-# 6) Summary (What to remember)
-
-This chapter mirrors notebook section “6. Summary”.
-
-## 6.1 What the project achieved
+## 5.1 What the project achieved
 
 - Built a point-in-time (PIT) dataset combining:
   - daily asset returns (SPY, TLT, GLD)
@@ -1054,7 +1051,7 @@ This chapter mirrors notebook section “6. Summary”.
 - Evaluated calibration statistically:
   - Kupiec POF test on breach frequency
 
-## 6.2 What is the “core intellectual contribution” here?
+## 5.2 What is the “core intellectual contribution” here?
 
 The *conceptual leap* is:
 
@@ -1068,28 +1065,48 @@ The *quantitative validation* is:
 
 > Kupiec’s POF test to test VaR calibration out-of-sample.
 
-## 6.3 What to verify if results look suspicious
+## 5.3 What to verify if results look suspicious
 
 - Did you set `FRED_API_KEY` correctly?
 - Did the pipeline use publication dates (`realtime_start`) and `merge_asof` backward?
 - Are scalers fit on training only?
 - Are your `test_loader` batches unshuffled?
 
-## 6.4 What you should be able to reproduce offline
+## 5.4 What you should be able to reproduce offline
 
 - Implement a PIT merge for one macro variable.
 - Implement log returns and rolling volatility.
 - Derive the flow change-of-variables log-likelihood.
 - Implement VaR and ES from Monte Carlo samples.
 - Implement Kupiec POF test.
-<a id="walk-forward-cv"></a>
-# 7) Walk-Forward Cross-Validation (Expanding window + warm start)
 
-This chapter mirrors notebook section “7. Walk-Forward Cross-Validation”.
+## 5.5 Model Comparison
+
+The notebook compares all three models on the test set (2022–2024) using the same protocol: predicted daily 1% VaR versus actual equal-weighted portfolio returns, validated via Kupiec’s POF test.
+
+| Model | VaR Method | Macro-aware | Breach Rate | LR Stat | Kupiec |
+|-------|-----------|-------------|-------------|---------|--------|
+| Gaussian VaR | Normal quantile | No | (observed) | (computed) | PASS/FAIL |
+| GB Quantile | Direct quantile | Yes | (observed) | (computed) | PASS/FAIL |
+| TFT+MAF | Monte Carlo 10k | Yes | (observed) | (computed) | PASS/FAIL |
+
+Reading the table:
+- **Breach rate** should be close to 1.00% for a well-calibrated VaR. Too high = VaR too optimistic; too low = too conservative.
+- **LR Stat** is Kupiec’s likelihood-ratio statistic. Under $H_0$ it follows $\chi^2(1)$; critical value 3.841 at 5%.
+- **Kupiec verdict**: PASS means the model is statistically well-calibrated at 5% significance.
+
+Key interpretation:
+- Gaussian VaR: constant, blind to regime shifts — expected to underperform in stress periods like 2022.
+- GB Quantile: regime-aware but outputs a single quantile only — no tail shape, no Expected Shortfall.
+- TFT+MAF: full conditional distribution, captures fat tails and time-varying correlations.
+<a id=”walk-forward-cv”></a>
+# 6) Walk-Forward Cross-Validation (Expanding window + warm start)
+
+This chapter mirrors notebook section “6. Walk-Forward Cross-Validation”.
 
 Primary implementation: `build_walk_forward_pipeline()` in [src/data/pipeline.py](src/data/pipeline.py).
 
-## 7.1 Why walk-forward CV for time series?
+## 6.1 Why walk-forward CV for time series?
 
 Standard k-fold cross-validation randomly shuffles data. That breaks time order and leaks future information.
 
@@ -1099,7 +1116,7 @@ In time series, a valid evaluation must be chronological:
 
 Walk-forward does exactly that, repeatedly.
 
-## 7.2 Expanding window vs rolling window
+## 6.2 Expanding window vs rolling window
 
 Two common schemes:
 
@@ -1115,7 +1132,7 @@ Why choose expanding here?
 - deep models and flows are data-hungry
 - you want the model to see multiple regimes
 
-## 7.3 The fold definition in this repo
+## 6.3 The fold definition in this repo
 
 In [src/data/pipeline.py](src/data/pipeline.py), `build_walk_forward_pipeline` generates folds like:
 
@@ -1131,7 +1148,7 @@ So roughly:
 
 (Exact depends on `start_year`, `end_year`, etc.)
 
-## 7.4 Warm start vs cold start
+## 6.4 Warm start vs cold start
 
 Cold start:
 - reinitialize model weights every fold.
@@ -1148,13 +1165,13 @@ But be careful:
 - the optimizer state can cause weird dynamics.
 - in the notebook, the trainer resets scheduler and LR (`reset_for_new_fold`).
 
-## 7.5 Scaling within folds
+## 6.5 Scaling within folds
 
 Each fold fits scalers on the fold’s training set only.
 
 That preserves “no leakage” property at every fold.
 
-## 7.6 Output of the walk-forward generator
+## 6.6 Output of the walk-forward generator
 
 Each yield gives:
 
@@ -1169,11 +1186,101 @@ The notebook then:
 - runs a backtest on the fold’s test period
 - concatenates all fold test results into one long out-of-sample record
 
-## 7.7 What you should be able to explain
+## 6.7 What you should be able to explain
 
 1) Why random splits are invalid for financial time series.
 2) Why expanding windows are often preferred for data-hungry deep models.
 3) What warm start changes (and why resetting LR scheduler matters).
+<a id=”interpretability”></a>
+# 7) Model Interpretability: Opening the Black Box
+
+This chapter mirrors notebook section “7. Model Interpretability: Opening the Black Box”.
+
+Both the Gradient Boosting and TFT+MAF models learn from macro features. This section examines which features each model relies on most.
+
+Primary implementation:
+- GB feature importances: [src/backtest/benchmarks.py](src/backtest/benchmarks.py)
+- TFT variable selection weights: [src/models/tft.py](src/models/tft.py)
+- helper method: `ConditionalNormalizingFlow.get_variable_importance`: [src/models/flow_model.py](src/models/flow_model.py)
+
+## 7.1 Gradient Boosting: Feature Importance
+
+Feature importances from the GB quantile model, averaged across the 63-step macro sequence per feature.
+
+What is measured:
+- For `GradientBoostingRegressor`, `feature_importances_` is the **mean decrease in impurity** across all trees and all splits involving each feature.
+- Since GB receives the macro sequence flattened into a vector of shape $(63 \times F)$, each original feature appears 63 times (once per time step). The notebook averages these across time steps.
+
+So the bar chart shows:
+- which macro features the GB model relied on most to predict the 1% quantile of portfolio returns.
+- averaged over all 63 time steps in the input window.
+
+Caution: impurity-based importance can be biased toward high-cardinality features. It also does not tell you the direction of the effect.
+
+## 7.2 TFT+MAF: Variable Importance
+
+The TFT encoder learns to weight macro features via attention. The variable importance score reflects how much each feature is selected on average across the test set.
+
+The model is:
+
+$$M_{<t} \to h_t \to p(X_t\mid h_t)$$
+
+The flow part (MAF) is powerful but not naturally interpretable.
+
+The TFT part includes a Variable Selection Network (VSN) that outputs **weights** per feature per time step.
+
+These weights are a form of learned “attention over variables”.
+
+## 7.3 Where do weights come from?
+
+In [src/models/tft.py](src/models/tft.py):
+
+- each feature is embedded into a vector
+- the VSN computes:
+  - a transformed representation per variable
+  - a selection score per variable
+- softmax turns scores into weights that sum to 1 across variables.
+
+So for each sample (batch element) and each time step:
+
+$$w_{t,i} \ge 0, \quad \sum_{i=1}^{F} w_{t,i} = 1$$
+
+Interpretation:
+- if $w_{t,i}$ is large, feature $i$ is important at time $t$ for building the regime representation.
+
+## 7.4 How the notebook computes importance
+
+The notebook loops over `test_loader` and calls:
+
+- `model.get_variable_importance(macro_seq)`
+
+which returns an average over:
+- batch dimension
+- time dimension
+
+So output is:
+- a vector of length $F$ (one scalar per feature)
+
+This is plotted as a horizontal bar chart.
+
+## 7.5 Cautions (interpretability is not causality)
+
+Important: these weights are **not causal effects**.
+
+They tell you:
+- which features the model used to compress information into $h_t$
+
+They do not prove:
+- “CPI causes returns”
+
+To reason about causality you would need an entirely different setup.
+
+## 7.6 What you should be able to explain
+
+1) Why weights sum to 1 (softmax).
+2) Why “importance” is model-dependent.
+3) Why interpretability here is about representation, not causality.
+4) Why GB feature importance and TFT variable weights measure different things.
 <a id="glossary"></a>
 # Glossary (terms you must own)
 

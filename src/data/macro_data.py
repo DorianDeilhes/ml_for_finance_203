@@ -83,6 +83,17 @@ def _download_fred_series_with_vintages(
                 # Some series (like BAMLH0A0HYM2) simply don't have vintage data going back to 2003
                 # FRED API responds with a specific ValueError for dates that predate ALFRED
                 if "does not exist in ALFRED" in str(e):
+                    logger.info("  Vintage data missing for %s to %s, using basic fallback with lag.", c_start.date(), c_end.date())
+                    chunk_series = fred.get_series(series_id, observation_start=c_start, observation_end=c_end)
+                    if not chunk_series.empty:
+                        chunk_df = pd.DataFrame({
+                            "observation_date": pd.to_datetime(chunk_series.index),
+                            label: chunk_series.values
+                        })
+                        # Monthly series lag ~45 days; daily series lag 1 day
+                        lag_days = 45 if series_id in ("CPIAUCSL", "PAYEMS") else 1
+                        chunk_df["realtime_start"] = chunk_df["observation_date"] + pd.Timedelta(days=lag_days)
+                        dfs.append(chunk_df)
                     continue
                 raise e
 
@@ -122,7 +133,7 @@ def _download_fred_series_with_vintages(
         df = pd.DataFrame({"observation_date": pd.to_datetime(series.index), label: series.values})
 
         # Monthly series lag ~45 days; daily series lag 1 day
-        lag_days = 45 if series_id in ("CPIAUCSL", "PAYEMS", "BAMLH0A0HYM2") else 1
+        lag_days = 45 if series_id in ("CPIAUCSL", "PAYEMS") else 1
         df["realtime_start"] = df["observation_date"] + pd.Timedelta(days=lag_days)
 
         return df[df["observation_date"] >= start].copy()

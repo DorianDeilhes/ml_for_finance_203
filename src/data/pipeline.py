@@ -349,6 +349,7 @@ def build_pipeline(
         "master_train": master_train,
         "master_val": master_val,
         "master_test": master_test,
+        "master" : master,
     }
 
     return train_loader, val_loader, test_loader, macro_scaler, ret_scaler, info, num_macro_features, num_assets
